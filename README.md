@@ -5,14 +5,14 @@ A middleware that makes remote and heterogeneous memory transparently available 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────┐
-│  Applications                                   │
-│  ┌──────────────────┐  ┌──────────────────────┐ │
-│  │ Unmodified apps  │  │ Optimized apps       │ │
-│  │ (transparent via │  │ (use libduvm API)    │ │
-│  │  kernel swap)    │  │                      │ │
-│  └────────┬─────────┘  └──────────┬───────────┘ │
-├───────────┼────────────────────────┼─────────────┤
+┌──────────────────────────────────────────────────┐
+│  Applications                                    │
+│  ┌──────────────────┐  ┌──────────────────────┐  │
+│  │ Unmodified apps  │  │ Optimized apps       │  │
+│  │ (transparent via │  │ (use libduvm API)    │  │
+│  │  kernel swap)    │  │                      │  │
+│  └────────┬─────────┘  └──────────┬───────────┘  │
+├───────────┼───────────────────────┼──────────────┤
 │ KERNEL    │    duvm-kmod.ko (thin relay)         │
 │           └──► ring buffer ──────────────────┐   │
 ├──────────────────────────────────────────────┤   │
