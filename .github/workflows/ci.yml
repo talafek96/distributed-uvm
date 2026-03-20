@@ -49,3 +49,23 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --workspace
+
+  e2e-kmod:
+    name: Kernel module E2E (QEMU)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-system-arm \
+            busybox-static \
+            linux-headers-$(uname -r) \
+            build-essential \
+            cpio \
+            gzip \
+            file
+      - name: Run QEMU system test
+        run: bash scripts/test-kmod-qemu.sh
