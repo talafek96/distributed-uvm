@@ -141,9 +141,10 @@ impl DuvmBackend for TcpBackend {
         let mut resp = [0u8; 1];
         stream.read_exact(&mut resp)?;
 
-        if resp[0] == RESP_OK {
-            self.pages_used.fetch_sub(1, Ordering::Relaxed);
+        if resp[0] != RESP_OK {
+            bail!("free failed on remote server for handle {}", handle);
         }
+        self.pages_used.fetch_sub(1, Ordering::Relaxed);
         Ok(())
     }
 

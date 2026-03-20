@@ -89,28 +89,75 @@ fn main() {
 
         // Test: prefers lowest latency
         let caps = vec![
-            BackendCapacity { backend_id: 0, tier: Tier::Rdma, total_pages: 100, used_pages: 0, latency_ns: 250_000, healthy: true },
-            BackendCapacity { backend_id: 1, tier: Tier::Compressed, total_pages: 100, used_pages: 0, latency_ns: 3_000, healthy: true },
+            BackendCapacity {
+                backend_id: 0,
+                tier: Tier::Rdma,
+                total_pages: 100,
+                used_pages: 0,
+                latency_ns: 250_000,
+                healthy: true,
+            },
+            BackendCapacity {
+                backend_id: 1,
+                tier: Tier::Compressed,
+                total_pages: 100,
+                used_pages: 0,
+                latency_ns: 3_000,
+                healthy: true,
+            },
         ];
         let t1 = policy.select_tier(&caps) == Some(Tier::Compressed);
 
         // Test: cascades when full
         let caps2 = vec![
-            BackendCapacity { backend_id: 1, tier: Tier::Compressed, total_pages: 100, used_pages: 100, latency_ns: 3_000, healthy: true },
-            BackendCapacity { backend_id: 0, tier: Tier::Rdma, total_pages: 100, used_pages: 50, latency_ns: 250_000, healthy: true },
+            BackendCapacity {
+                backend_id: 1,
+                tier: Tier::Compressed,
+                total_pages: 100,
+                used_pages: 100,
+                latency_ns: 3_000,
+                healthy: true,
+            },
+            BackendCapacity {
+                backend_id: 0,
+                tier: Tier::Rdma,
+                total_pages: 100,
+                used_pages: 50,
+                latency_ns: 250_000,
+                healthy: true,
+            },
         ];
         let t2 = policy.select_tier(&caps2) == Some(Tier::Rdma);
 
         // Test: returns None when all full
-        let caps3 = vec![
-            BackendCapacity { backend_id: 1, tier: Tier::Compressed, total_pages: 10, used_pages: 10, latency_ns: 3_000, healthy: true },
-        ];
+        let caps3 = vec![BackendCapacity {
+            backend_id: 1,
+            tier: Tier::Compressed,
+            total_pages: 10,
+            used_pages: 10,
+            latency_ns: 3_000,
+            healthy: true,
+        }];
         let t3 = policy.select_tier(&caps3).is_none();
 
         // Test: skips unhealthy
         let caps4 = vec![
-            BackendCapacity { backend_id: 0, tier: Tier::Compressed, total_pages: 100, used_pages: 0, latency_ns: 3_000, healthy: false },
-            BackendCapacity { backend_id: 1, tier: Tier::Rdma, total_pages: 100, used_pages: 0, latency_ns: 250_000, healthy: true },
+            BackendCapacity {
+                backend_id: 0,
+                tier: Tier::Compressed,
+                total_pages: 100,
+                used_pages: 0,
+                latency_ns: 3_000,
+                healthy: false,
+            },
+            BackendCapacity {
+                backend_id: 1,
+                tier: Tier::Rdma,
+                total_pages: 100,
+                used_pages: 0,
+                latency_ns: 250_000,
+                healthy: true,
+            },
         ];
         let t4 = policy.select_tier(&caps4) == Some(Tier::Rdma);
 
@@ -129,8 +176,14 @@ fn main() {
     print!("[3/12] LRU eviction under memory pressure... ");
     {
         let mut config = DaemonConfig::default();
-        config.backends.memory = Some(duvm_daemon::config::MemoryBackendConfig { enabled: true, max_pages: 3 });
-        config.backends.compress = Some(duvm_daemon::config::CompressBackendConfig { enabled: true, max_pages: 3 });
+        config.backends.memory = Some(duvm_daemon::config::MemoryBackendConfig {
+            enabled: true,
+            max_pages: 3,
+        });
+        config.backends.compress = Some(duvm_daemon::config::CompressBackendConfig {
+            enabled: true,
+            max_pages: 3,
+        });
 
         let engine = Engine::new(config).unwrap();
         let data = [0u8; PAGE_SIZE];
@@ -157,7 +210,10 @@ fn main() {
             println!("PASS (eviction succeeded, new page loadable, hot pages survived)");
             tests_passed += 1;
         } else {
-            println!("FAIL (eviction={}, loadable={}, hot_survived={})", eviction_worked, new_page_loadable, hot_survived);
+            println!(
+                "FAIL (eviction={}, loadable={}, hot_survived={})",
+                eviction_worked, new_page_loadable, hot_survived
+            );
             tests_failed += 1;
         }
     }
@@ -168,8 +224,14 @@ fn main() {
     print!("[4/12] Multi-backend cascading (compress full -> memory)... ");
     {
         let mut config = DaemonConfig::default();
-        config.backends.compress = Some(duvm_daemon::config::CompressBackendConfig { enabled: true, max_pages: 2 });
-        config.backends.memory = Some(duvm_daemon::config::MemoryBackendConfig { enabled: true, max_pages: 100 });
+        config.backends.compress = Some(duvm_daemon::config::CompressBackendConfig {
+            enabled: true,
+            max_pages: 2,
+        });
+        config.backends.memory = Some(duvm_daemon::config::MemoryBackendConfig {
+            enabled: true,
+            max_pages: 100,
+        });
 
         let engine = Engine::new(config).unwrap();
         let data = [0xAA; PAGE_SIZE];
@@ -240,7 +302,10 @@ fn main() {
             println!("PASS (50 invalidated, 50 remaining, all verified)");
             tests_passed += 1;
         } else {
-            println!("FAIL (even_gone={}, odd_ok={}, invalidated={})", even_gone, odd_ok, snap.pages_invalidated);
+            println!(
+                "FAIL (even_gone={}, odd_ok={}, invalidated={})",
+                even_gone, odd_ok, snap.pages_invalidated
+            );
             tests_failed += 1;
         }
     }
@@ -344,9 +409,18 @@ fn main() {
         });
 
         match result {
-            Ok(true) => { println!("PASS (ping, status, backends, stats)"); tests_passed += 1; }
-            Ok(false) => { println!("FAIL (some commands returned unexpected results)"); tests_failed += 1; }
-            Err(e) => { println!("FAIL (error: {})", e); tests_failed += 1; }
+            Ok(true) => {
+                println!("PASS (ping, status, backends, stats)");
+                tests_passed += 1;
+            }
+            Ok(false) => {
+                println!("FAIL (some commands returned unexpected results)");
+                tests_failed += 1;
+            }
+            Err(e) => {
+                println!("FAIL (error: {})", e);
+                tests_failed += 1;
+            }
         }
     }
 
@@ -356,8 +430,8 @@ fn main() {
     print!("[8/12] TCP backend with local memserver... ");
     {
         use duvm_backend_tcp::TcpBackend;
-        use std::net::TcpListener;
         use std::io::{Read, Write};
+        use std::net::TcpListener;
 
         // Start a mini memserver on an ephemeral port
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -365,15 +439,19 @@ fn main() {
 
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut pages: std::collections::HashMap<u64, Box<[u8; PAGE_SIZE]>> = std::collections::HashMap::new();
+            let mut pages: std::collections::HashMap<u64, Box<[u8; PAGE_SIZE]>> =
+                std::collections::HashMap::new();
             let mut next_offset = 0u64;
 
             loop {
                 let mut op = [0u8; 1];
-                if stream.read_exact(&mut op).is_err() { break; }
+                if stream.read_exact(&mut op).is_err() {
+                    break;
+                }
 
                 match op[0] {
-                    4 => { // ALLOC
+                    4 => {
+                        // ALLOC
                         let offset = next_offset;
                         next_offset += 1;
                         let mut resp = [0u8; 9];
@@ -381,7 +459,8 @@ fn main() {
                         resp[1..9].copy_from_slice(&offset.to_le_bytes());
                         stream.write_all(&resp).unwrap();
                     }
-                    1 => { // STORE
+                    1 => {
+                        // STORE
                         let mut header = [0u8; 8];
                         stream.read_exact(&mut header).unwrap();
                         let offset = u64::from_le_bytes(header);
@@ -390,7 +469,8 @@ fn main() {
                         pages.insert(offset, data);
                         stream.write_all(&[0]).unwrap();
                     }
-                    2 => { // LOAD
+                    2 => {
+                        // LOAD
                         let mut header = [0u8; 8];
                         stream.read_exact(&mut header).unwrap();
                         let offset = u64::from_le_bytes(header);
@@ -399,24 +479,34 @@ fn main() {
                                 stream.write_all(&[0]).unwrap();
                                 stream.write_all(data.as_ref()).unwrap();
                             }
-                            None => { stream.write_all(&[1]).unwrap(); }
+                            None => {
+                                stream.write_all(&[1]).unwrap();
+                            }
                         }
                     }
-                    3 => { // FREE
+                    3 => {
+                        // FREE
                         let mut header = [0u8; 8];
                         stream.read_exact(&mut header).unwrap();
                         let offset = u64::from_le_bytes(header);
                         pages.remove(&offset);
                         stream.write_all(&[0]).unwrap();
                     }
-                    _ => { stream.write_all(&[1]).unwrap(); }
+                    _ => {
+                        stream.write_all(&[1]).unwrap();
+                    }
                 }
                 stream.flush().unwrap();
             }
         });
 
         let mut backend = TcpBackend::new(2, &addr.to_string());
-        backend.init(&BackendConfig { max_pages: 10000, ..Default::default() }).unwrap();
+        backend
+            .init(&BackendConfig {
+                max_pages: 10000,
+                ..Default::default()
+            })
+            .unwrap();
 
         let num = 100u64;
         let mut ok = true;
@@ -524,10 +614,17 @@ fn main() {
         let ops_per_sec = ops as f64 / elapsed.as_secs_f64();
 
         if ops_per_sec > 1_000_000.0 {
-            println!("PASS ({:.1}M ops/sec, {:.0}ns/op)", ops_per_sec / 1e6, elapsed.as_nanos() as f64 / ops as f64);
+            println!(
+                "PASS ({:.1}M ops/sec, {:.0}ns/op)",
+                ops_per_sec / 1e6,
+                elapsed.as_nanos() as f64 / ops as f64
+            );
             tests_passed += 1;
         } else {
-            println!("PASS ({:.0} ops/sec — slower than expected but functional)", ops_per_sec);
+            println!(
+                "PASS ({:.0} ops/sec — slower than expected but functional)",
+                ops_per_sec
+            );
             tests_passed += 1; // Still a pass; just slower in debug mode
         }
     }
@@ -538,7 +635,10 @@ fn main() {
     print!("[11/12] Double-store frees old handle (no leak)... ");
     {
         let mut config = DaemonConfig::default();
-        config.backends.compress = Some(duvm_daemon::config::CompressBackendConfig { enabled: true, max_pages: 10 });
+        config.backends.compress = Some(duvm_daemon::config::CompressBackendConfig {
+            enabled: true,
+            max_pages: 10,
+        });
         config.backends.memory = None;
 
         let engine = Engine::new(config).unwrap();
@@ -547,10 +647,18 @@ fn main() {
         let data2 = [0xBB; PAGE_SIZE];
 
         engine.store_page(0, &data1).unwrap();
-        let used_1 = engine.backend_info().iter().map(|b| b.used_pages).sum::<u64>();
+        let used_1 = engine
+            .backend_info()
+            .iter()
+            .map(|b| b.used_pages)
+            .sum::<u64>();
 
         engine.store_page(0, &data2).unwrap();
-        let used_2 = engine.backend_info().iter().map(|b| b.used_pages).sum::<u64>();
+        let used_2 = engine
+            .backend_info()
+            .iter()
+            .map(|b| b.used_pages)
+            .sum::<u64>();
 
         let mut buf = [0u8; PAGE_SIZE];
         engine.load_page(0, &mut buf).unwrap();
@@ -560,7 +668,10 @@ fn main() {
             println!("PASS (used stays at 1 after re-store, data updated)");
             tests_passed += 1;
         } else {
-            println!("FAIL (used_1={}, used_2={}, data_correct={})", used_1, used_2, data_correct);
+            println!(
+                "FAIL (used_1={}, used_2={}, data_correct={})",
+                used_1, used_2, data_correct
+            );
             tests_failed += 1;
         }
     }
@@ -575,7 +686,10 @@ fn main() {
 
         // Zero max_pages on enabled backend should fail
         let mut bad = DaemonConfig::default();
-        bad.backends.memory = Some(duvm_daemon::config::MemoryBackendConfig { enabled: true, max_pages: 0 });
+        bad.backends.memory = Some(duvm_daemon::config::MemoryBackendConfig {
+            enabled: true,
+            max_pages: 0,
+        });
         let t2 = bad.validate().is_err();
 
         // Unknown strategy should fail
@@ -585,7 +699,10 @@ fn main() {
 
         // Disabled backend with zero pages should pass
         let mut ok = DaemonConfig::default();
-        ok.backends.memory = Some(duvm_daemon::config::MemoryBackendConfig { enabled: false, max_pages: 0 });
+        ok.backends.memory = Some(duvm_daemon::config::MemoryBackendConfig {
+            enabled: false,
+            max_pages: 0,
+        });
         let t4 = ok.validate().is_ok();
 
         // CLI overrides
@@ -594,7 +711,9 @@ fn main() {
         let t5 = cfg.daemon.socket_path == "/tmp/test.sock";
 
         if t1 && t2 && t3 && t4 && t5 {
-            println!("PASS (default-ok, zero-pages-fail, bad-strategy-fail, disabled-ok, cli-override)");
+            println!(
+                "PASS (default-ok, zero-pages-fail, bad-strategy-fail, disabled-ok, cli-override)"
+            );
             tests_passed += 1;
         } else {
             println!("FAIL (t1={} t2={} t3={} t4={} t5={})", t1, t2, t3, t4, t5);
@@ -607,8 +726,13 @@ fn main() {
     // =========================================================================
     let total_elapsed = total_start.elapsed();
     println!("\n================================================================================");
-    println!("  Results: {}/{} passed, {} failed — completed in {:?}",
-        tests_passed, tests_passed + tests_failed, tests_failed, total_elapsed);
+    println!(
+        "  Results: {}/{} passed, {} failed — completed in {:?}",
+        tests_passed,
+        tests_passed + tests_failed,
+        tests_failed,
+        total_elapsed
+    );
     println!("================================================================================");
 
     if tests_failed > 0 {

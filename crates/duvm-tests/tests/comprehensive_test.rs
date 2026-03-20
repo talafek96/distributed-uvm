@@ -7,7 +7,7 @@
 use duvm_backend_compress::CompressBackend;
 use duvm_backend_memory::MemoryBackend;
 use duvm_backend_trait::{BackendConfig, DuvmBackend};
-use duvm_common::page::{PageFlags, PageHandle, PAGE_SIZE, Tier};
+use duvm_common::page::{PAGE_SIZE, PageFlags, PageHandle, Tier};
 use duvm_common::protocol::{OpCode, RingCompletion, RingRequest};
 use duvm_common::ring::{CompletionRing, RequestRing};
 use duvm_common::stats::DaemonStats;
@@ -41,7 +41,10 @@ fn memory_backend_capacity_limit_enforced() {
 
     // Next alloc should fail
     let result = backend.alloc_page();
-    assert!(result.is_err(), "alloc_page should fail when backend is full");
+    assert!(
+        result.is_err(),
+        "alloc_page should fail when backend is full"
+    );
 }
 
 /// Prove: compress backend capacity limit is enforced.
@@ -61,7 +64,10 @@ fn compress_backend_capacity_limit_enforced() {
     backend.store_page(h2, &[0u8; PAGE_SIZE]).unwrap();
 
     let result = backend.alloc_page();
-    assert!(result.is_err(), "alloc_page should fail when backend is full");
+    assert!(
+        result.is_err(),
+        "alloc_page should fail when backend is full"
+    );
 }
 
 /// Prove: loading a non-existent page returns an error, not a crash.
@@ -250,12 +256,7 @@ fn policy_eviction_multiple_access_patterns() {
 
     // Store 5 pages all at different times
     for i in 0..5 {
-        policy.record_store(
-            i,
-            PageHandle::new(0, i),
-            0,
-            Tier::Compressed,
-        );
+        policy.record_store(i, PageHandle::new(0, i), 0, Tier::Compressed);
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
 
@@ -375,7 +376,11 @@ fn engine_500_pages_data_integrity() {
             "tail mismatch at offset {}",
             offset
         );
-        assert_eq!(buf, *expected_data, "full page mismatch at offset {}", offset);
+        assert_eq!(
+            buf, *expected_data,
+            "full page mismatch at offset {}",
+            offset
+        );
     }
 
     let snap = engine.stats_snapshot();
@@ -528,12 +533,7 @@ fn policy_concurrent_store_and_load() {
         threads.push(thread::spawn(move || {
             for i in 0..100 {
                 let offset = t * 100 + i;
-                policy.record_store(
-                    offset,
-                    PageHandle::new(0, offset),
-                    0,
-                    Tier::Compressed,
-                );
+                policy.record_store(offset, PageHandle::new(0, offset), 0, Tier::Compressed);
             }
         }));
     }
@@ -661,7 +661,10 @@ fn ring_buffer_full_and_empty_cycles() {
         assert_eq!(popped.seq, i);
     }
 
-    assert!(ring.try_pop().is_none(), "pop from empty ring should return None");
+    assert!(
+        ring.try_pop().is_none(),
+        "pop from empty ring should return None"
+    );
     assert!(ring.is_empty());
 }
 
@@ -783,7 +786,10 @@ fn config_default_produces_valid_engine() {
 
     let engine = engine.unwrap();
     let info = engine.backend_info();
-    assert!(!info.is_empty(), "default config should have at least one backend");
+    assert!(
+        !info.is_empty(),
+        "default config should have at least one backend"
+    );
 }
 
 /// Prove: config with both backends disabled produces an engine with no backends.
@@ -1115,16 +1121,22 @@ fn engine_double_store_frees_old_handle() {
     let data2 = [0xBB; PAGE_SIZE];
 
     engine.store_page(0, &data1).unwrap();
-    let (_, used_after_first) = engine.backend_info().iter()
+    let (_, used_after_first) = engine
+        .backend_info()
+        .iter()
         .map(|b| (b.total_pages, b.used_pages))
-        .next().unwrap();
+        .next()
+        .unwrap();
     assert_eq!(used_after_first, 1);
 
     // Second store at same offset should free the first page
     engine.store_page(0, &data2).unwrap();
-    let (_, used_after_second) = engine.backend_info().iter()
+    let (_, used_after_second) = engine
+        .backend_info()
+        .iter()
         .map(|b| (b.total_pages, b.used_pages))
-        .next().unwrap();
+        .next()
+        .unwrap();
     // Should still be 1, not 2 (old page was freed)
     assert_eq!(used_after_second, 1, "old page should be freed on re-store");
 
@@ -1178,7 +1190,11 @@ fn engine_eviction_under_pressure() {
 
     // Hot pages 3-5 should still be loadable
     for i in 3..6 {
-        assert!(engine.load_page(i, &mut buf).is_ok(), "hot page {} should survive", i);
+        assert!(
+            engine.load_page(i, &mut buf).is_ok(),
+            "hot page {} should survive",
+            i
+        );
     }
 }
 
@@ -1189,7 +1205,10 @@ fn pool_free_with_invalid_backend_errors() {
     // Create a handle with backend_id=99 which doesn't exist
     let fake_handle = PageHandle::new(99, 0);
     let result = pool.free(fake_handle);
-    assert!(result.is_err(), "freeing from non-existent backend should error");
+    assert!(
+        result.is_err(),
+        "freeing from non-existent backend should error"
+    );
 }
 
 /// Prove: pool.capacity() uses saturating_add (no overflow).
@@ -1201,7 +1220,10 @@ fn pool_capacity_does_not_overflow() {
     assert!(total > 0);
     assert_eq!(used, 0);
     // Basic sanity: total should be sum of both backends
-    assert!(total >= 2, "should have at least 2 backends worth of capacity");
+    assert!(
+        total >= 2,
+        "should have at least 2 backends worth of capacity"
+    );
 }
 
 // ============================================================================
@@ -1411,10 +1433,26 @@ fn ring_request_field_layout() {
     let bytes = bytemuck::bytes_of(&req);
     assert_eq!(bytes[0], 0xAB, "op at offset 0");
     assert_eq!(bytes[1], 0xCD, "flags at offset 1");
-    assert_eq!(&bytes[4..8], &0x12345678u32.to_le_bytes(), "seq at offset 4");
-    assert_eq!(&bytes[8..16], &0x0102030405060708u64.to_le_bytes(), "pfn at offset 8");
-    assert_eq!(&bytes[16..24], &0x1112131415161718u64.to_le_bytes(), "offset at offset 16");
-    assert_eq!(&bytes[24..28], &0xAABBCCDDu32.to_le_bytes(), "staging_slot at offset 24");
+    assert_eq!(
+        &bytes[4..8],
+        &0x12345678u32.to_le_bytes(),
+        "seq at offset 4"
+    );
+    assert_eq!(
+        &bytes[8..16],
+        &0x0102030405060708u64.to_le_bytes(),
+        "pfn at offset 8"
+    );
+    assert_eq!(
+        &bytes[16..24],
+        &0x1112131415161718u64.to_le_bytes(),
+        "offset at offset 16"
+    );
+    assert_eq!(
+        &bytes[24..28],
+        &0xAABBCCDDu32.to_le_bytes(),
+        "staging_slot at offset 24"
+    );
 }
 
 /// Prove: RingCompletion fields are at expected byte offsets.
@@ -1427,11 +1465,27 @@ fn ring_completion_field_layout() {
     comp.staging_slot = 0x99887766;
 
     let bytes = bytemuck::bytes_of(&comp);
-    assert_eq!(&bytes[0..4], &0xDEADBEEFu32.to_le_bytes(), "seq at offset 0");
+    assert_eq!(
+        &bytes[0..4],
+        &0xDEADBEEFu32.to_le_bytes(),
+        "seq at offset 0"
+    );
     assert_eq!(&bytes[4..8], &(-42i32).to_le_bytes(), "result at offset 4");
-    assert_eq!(&bytes[8..16], &0xCAFEBABE01020304u64.to_le_bytes(), "handle at offset 8");
-    assert_eq!(&bytes[12..16], &0xCAFEBABEu32.to_le_bytes(), "handle upper at offset 12");
-    assert_eq!(&bytes[16..20], &0x99887766u32.to_le_bytes(), "staging_slot at offset 16");
+    assert_eq!(
+        &bytes[8..16],
+        &0xCAFEBABE01020304u64.to_le_bytes(),
+        "handle at offset 8"
+    );
+    assert_eq!(
+        &bytes[12..16],
+        &0xCAFEBABEu32.to_le_bytes(),
+        "handle upper at offset 12"
+    );
+    assert_eq!(
+        &bytes[16..20],
+        &0x99887766u32.to_le_bytes(),
+        "staging_slot at offset 16"
+    );
 }
 
 /// Prove: OpCode invalid values return None.
@@ -1478,7 +1532,11 @@ fn request_completion_seq_matching() {
     assert_eq!(seqs_seen.len(), 5);
     // All original seqs should be present (order may differ)
     for expected_seq in [10, 20, 30, 40, 50] {
-        assert!(seqs_seen.contains(&expected_seq), "missing seq {}", expected_seq);
+        assert!(
+            seqs_seen.contains(&expected_seq),
+            "missing seq {}",
+            expected_seq
+        );
     }
 }
 
@@ -1490,13 +1548,27 @@ fn request_completion_seq_matching() {
 #[test]
 fn stats_display_includes_all_fields() {
     let stats = DaemonStats::new();
-    stats.pages_stored.fetch_add(42, std::sync::atomic::Ordering::Relaxed);
-    stats.pages_loaded.fetch_add(17, std::sync::atomic::Ordering::Relaxed);
-    stats.pages_invalidated.fetch_add(3, std::sync::atomic::Ordering::Relaxed);
-    stats.store_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    stats.load_errors.fetch_add(2, std::sync::atomic::Ordering::Relaxed);
-    stats.fallback_events.fetch_add(5, std::sync::atomic::Ordering::Relaxed);
-    stats.ring_full_events.fetch_add(7, std::sync::atomic::Ordering::Relaxed);
+    stats
+        .pages_stored
+        .fetch_add(42, std::sync::atomic::Ordering::Relaxed);
+    stats
+        .pages_loaded
+        .fetch_add(17, std::sync::atomic::Ordering::Relaxed);
+    stats
+        .pages_invalidated
+        .fetch_add(3, std::sync::atomic::Ordering::Relaxed);
+    stats
+        .store_errors
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    stats
+        .load_errors
+        .fetch_add(2, std::sync::atomic::Ordering::Relaxed);
+    stats
+        .fallback_events
+        .fetch_add(5, std::sync::atomic::Ordering::Relaxed);
+    stats
+        .ring_full_events
+        .fetch_add(7, std::sync::atomic::Ordering::Relaxed);
 
     let snap = stats.snapshot();
     let display = format!("{}", snap);
@@ -1504,18 +1576,34 @@ fn stats_display_includes_all_fields() {
     assert!(display.contains("42"), "should contain pages_stored=42");
     assert!(display.contains("17"), "should contain pages_loaded=17");
     assert!(display.contains("3"), "should contain pages_invalidated=3");
-    assert!(display.contains("Store errors"), "should have store errors label");
-    assert!(display.contains("Load errors"), "should have load errors label");
-    assert!(display.contains("Fallback events"), "should have fallback label");
-    assert!(display.contains("Ring full events"), "should have ring full label");
+    assert!(
+        display.contains("Store errors"),
+        "should have store errors label"
+    );
+    assert!(
+        display.contains("Load errors"),
+        "should have load errors label"
+    );
+    assert!(
+        display.contains("Fallback events"),
+        "should have fallback label"
+    );
+    assert!(
+        display.contains("Ring full events"),
+        "should have ring full label"
+    );
 }
 
 /// Prove: StatsSnapshot serialization roundtrips through JSON.
 #[test]
 fn stats_snapshot_json_roundtrip() {
     let stats = DaemonStats::new();
-    stats.pages_stored.fetch_add(100, std::sync::atomic::Ordering::Relaxed);
-    stats.load_errors.fetch_add(3, std::sync::atomic::Ordering::Relaxed);
+    stats
+        .pages_stored
+        .fetch_add(100, std::sync::atomic::Ordering::Relaxed);
+    stats
+        .load_errors
+        .fetch_add(3, std::sync::atomic::Ordering::Relaxed);
 
     let snap = stats.snapshot();
     let json = serde_json::to_string(&snap).unwrap();
@@ -1564,7 +1652,12 @@ fn compress_backend_latency() {
 #[test]
 fn backend_info_from_backend_mapping() {
     let mut backend = MemoryBackend::new(0);
-    backend.init(&BackendConfig { max_pages: 500, ..Default::default() }).unwrap();
+    backend
+        .init(&BackendConfig {
+            max_pages: 500,
+            ..Default::default()
+        })
+        .unwrap();
 
     let h = backend.alloc_page().unwrap();
     backend.store_page(h, &[0u8; PAGE_SIZE]).unwrap();
@@ -1616,8 +1709,11 @@ fn engine_store_100_in_10_slots() {
     }
 
     // Should have about 10 pages loadable (the 10 most recent ones)
-    assert!((5..=12).contains(&loadable),
-        "expected ~10 loadable pages, got {}", loadable);
+    assert!(
+        (5..=12).contains(&loadable),
+        "expected ~10 loadable pages, got {}",
+        loadable
+    );
 
     let snap = engine.stats_snapshot();
     assert_eq!(snap.pages_stored, 100);
@@ -1639,4 +1735,263 @@ fn engine_no_backends_store_fails() {
 
     let snap = engine.stats_snapshot();
     assert!(snap.store_errors >= 1);
+}
+
+// ============================================================================
+// SECTION 21: Coverage for previously-untested public functions
+// ============================================================================
+
+/// Prove: PageHandle::raw() and from_raw() roundtrip correctly.
+#[test]
+fn page_handle_raw_and_from_raw() {
+    let h = PageHandle::new(7, 999);
+    let raw = h.raw();
+    let recovered = PageHandle::from_raw(raw);
+    assert_eq!(recovered.backend_id(), 7);
+    assert_eq!(recovered.offset(), 999);
+    assert_eq!(h, recovered);
+
+    // INVALID roundtrips too
+    let raw_invalid = PageHandle::INVALID.raw();
+    assert_eq!(raw_invalid, u64::MAX);
+    assert!(!PageHandle::from_raw(raw_invalid).is_valid());
+}
+
+/// Prove: RequestRing::capacity() returns the configured capacity.
+#[test]
+fn request_ring_capacity_getter() {
+    let ring = RequestRing::new(64);
+    assert_eq!(ring.capacity(), 64);
+
+    let ring2 = RequestRing::new(1024);
+    assert_eq!(ring2.capacity(), 1024);
+}
+
+/// Prove: CompletionRing::len() tracks items correctly.
+#[test]
+fn completion_ring_len() {
+    let mut ring = CompletionRing::new(16);
+    assert_eq!(ring.len(), 0);
+    assert!(ring.is_empty());
+
+    for i in 0..5 {
+        let mut comp: RingCompletion = bytemuck::Zeroable::zeroed();
+        comp.seq = i;
+        ring.try_push(comp);
+    }
+    assert_eq!(ring.len(), 5);
+
+    ring.try_pop();
+    ring.try_pop();
+    assert_eq!(ring.len(), 3);
+}
+
+/// Prove: BackendCapacity::utilization() returns correct fractions.
+#[test]
+fn backend_capacity_utilization_values() {
+    let empty = BackendCapacity {
+        backend_id: 0,
+        tier: Tier::Compressed,
+        total_pages: 100,
+        used_pages: 0,
+        latency_ns: 100,
+        healthy: true,
+    };
+    assert!((empty.utilization() - 0.0).abs() < f64::EPSILON);
+
+    let half = BackendCapacity {
+        backend_id: 0,
+        tier: Tier::Compressed,
+        total_pages: 200,
+        used_pages: 100,
+        latency_ns: 100,
+        healthy: true,
+    };
+    assert!((half.utilization() - 0.5).abs() < f64::EPSILON);
+
+    let zero_cap = BackendCapacity {
+        backend_id: 0,
+        tier: Tier::Compressed,
+        total_pages: 0,
+        used_pages: 0,
+        latency_ns: 100,
+        healthy: true,
+    };
+    // zero total_pages reports as 100% full
+    assert!((zero_cap.utilization() - 1.0).abs() < f64::EPSILON);
+}
+
+/// Prove: PolicyEngine::clear_flag() works on existing and non-existing pages.
+#[test]
+fn policy_clear_flag_coverage() {
+    let policy = PolicyEngine::new(Strategy::Lru);
+    policy.record_store(0, PageHandle::new(0, 0), 0, Tier::Compressed);
+
+    // Set and verify
+    policy.set_flag(0, PageFlags::DIRTY | PageFlags::PINNED);
+    let meta = policy.lookup(0).unwrap();
+    assert!(meta.flags.contains(PageFlags::DIRTY));
+    assert!(meta.flags.contains(PageFlags::PINNED));
+
+    // Clear only DIRTY
+    policy.clear_flag(0, PageFlags::DIRTY);
+    let meta = policy.lookup(0).unwrap();
+    assert!(!meta.flags.contains(PageFlags::DIRTY));
+    assert!(meta.flags.contains(PageFlags::PINNED));
+
+    // Clear on non-existent page is a no-op (no panic)
+    policy.clear_flag(999, PageFlags::DIRTY);
+}
+
+/// Prove: Engine::with_backends() creates a working engine.
+#[test]
+fn engine_with_backends_constructor() {
+    let mut backends: std::collections::HashMap<u8, Box<dyn duvm_backend_trait::DuvmBackend>> =
+        std::collections::HashMap::new();
+
+    let mut mem = MemoryBackend::new(0);
+    mem.init(&duvm_backend_trait::BackendConfig::default())
+        .unwrap();
+    backends.insert(0, Box::new(mem));
+
+    let config = DaemonConfig::default();
+    let engine = Engine::with_backends(config, backends);
+
+    let data = [0xAB; PAGE_SIZE];
+    engine.store_page(0, &data).unwrap();
+    let mut buf = [0u8; PAGE_SIZE];
+    engine.load_page(0, &mut buf).unwrap();
+    assert_eq!(buf[0], 0xAB);
+}
+
+/// Prove: Engine::stats() and Engine::policy() return usable handles.
+#[test]
+fn engine_stats_and_policy_getters() {
+    let config = DaemonConfig::default();
+    let engine = Engine::new(config).unwrap();
+
+    // stats() should work
+    let stats = engine.stats();
+    stats
+        .pages_stored
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(engine.stats_snapshot().pages_stored, 1);
+
+    // policy() should work
+    let policy = engine.policy();
+    policy.record_store(99, PageHandle::new(0, 0), 0, Tier::Compressed);
+    assert_eq!(policy.tracked_pages(), 1);
+}
+
+// ============================================================================
+// SECTION 22: Protocol bug fix verification
+// ============================================================================
+
+/// Prove: TCP backend alloc_page fails cleanly when memserver is full
+/// (verifies the ALLOC error response protocol fix — server must send 9 bytes).
+#[test]
+fn tcp_alloc_fails_cleanly_when_server_full() {
+    use duvm_backend_tcp::TcpBackend;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    // Start a mini memserver that is immediately full (max_pages=0)
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        loop {
+            let mut op = [0u8; 1];
+            if stream.read_exact(&mut op).is_err() {
+                break;
+            }
+            match op[0] {
+                4 => {
+                    // ALLOC — always fail (full server)
+                    let mut resp = [0u8; 9];
+                    resp[0] = 1; // RESP_ERR
+                    stream.write_all(&resp).unwrap();
+                }
+                _ => {
+                    stream.write_all(&[1]).unwrap();
+                }
+            }
+            stream.flush().unwrap();
+        }
+    });
+
+    let mut backend = TcpBackend::new(2, &addr.to_string());
+    backend
+        .init(&duvm_backend_trait::BackendConfig {
+            max_pages: 10000,
+            ..Default::default()
+        })
+        .unwrap();
+
+    // alloc_page should fail cleanly (not hang, not panic)
+    let result = backend.alloc_page();
+    assert!(result.is_err(), "alloc should fail when server is full");
+
+    backend.shutdown().unwrap();
+    drop(server);
+}
+
+/// Prove: TCP backend free_page propagates server errors.
+#[test]
+fn tcp_free_propagates_server_error() {
+    use duvm_backend_tcp::TcpBackend;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        loop {
+            let mut op = [0u8; 1];
+            if stream.read_exact(&mut op).is_err() {
+                break;
+            }
+            match op[0] {
+                4 => {
+                    // ALLOC — succeed
+                    let mut resp = [0u8; 9];
+                    resp[0] = 0;
+                    resp[1..9].copy_from_slice(&42u64.to_le_bytes());
+                    stream.write_all(&resp).unwrap();
+                }
+                3 => {
+                    // FREE — read offset, return error
+                    let mut header = [0u8; 8];
+                    stream.read_exact(&mut header).unwrap();
+                    stream.write_all(&[1]).unwrap(); // RESP_ERR
+                }
+                _ => {
+                    stream.write_all(&[1]).unwrap();
+                }
+            }
+            stream.flush().unwrap();
+        }
+    });
+
+    let mut backend = TcpBackend::new(2, &addr.to_string());
+    backend
+        .init(&duvm_backend_trait::BackendConfig {
+            max_pages: 10000,
+            ..Default::default()
+        })
+        .unwrap();
+
+    let handle = backend.alloc_page().unwrap();
+    // Free should fail because server returns error
+    let result = backend.free_page(handle);
+    assert!(
+        result.is_err(),
+        "free should propagate server error, not swallow it"
+    );
+
+    backend.shutdown().unwrap();
+    drop(server);
 }

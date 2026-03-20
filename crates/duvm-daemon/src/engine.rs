@@ -121,19 +121,18 @@ impl Engine {
                     })?
                 } else {
                     self.stats.store_errors.fetch_add(1, Ordering::Relaxed);
-                    anyhow::bail!("all backends are full — no tier available and no evictable pages");
+                    anyhow::bail!(
+                        "all backends are full — no tier available and no evictable pages"
+                    );
                 }
             }
         };
 
         let backend_id = self.tier_to_backend_id(tier);
-        let backend = self
-            .backends
-            .get(&backend_id)
-            .ok_or_else(|| {
-                self.stats.store_errors.fetch_add(1, Ordering::Relaxed);
-                anyhow::anyhow!("no backend for tier {:?} (id {})", tier, backend_id)
-            })?;
+        let backend = self.backends.get(&backend_id).ok_or_else(|| {
+            self.stats.store_errors.fetch_add(1, Ordering::Relaxed);
+            anyhow::anyhow!("no backend for tier {:?} (id {})", tier, backend_id)
+        })?;
 
         let handle = match backend.alloc_page() {
             Ok(h) => h,
@@ -344,7 +343,9 @@ async fn handle_client(
             "backends" => serde_json::to_string(backends_info)?,
             "stats" => serde_json::to_string(&stats.snapshot())?,
             "ping" => "pong".to_string(),
-            _ => serde_json::to_string(&serde_json::json!({"error": format!("unknown command: {}", cmd)}))?,
+            _ => serde_json::to_string(
+                &serde_json::json!({"error": format!("unknown command: {}", cmd)}),
+            )?,
         };
         writer.write_all(response.as_bytes()).await?;
         writer.write_all(b"\n").await?;

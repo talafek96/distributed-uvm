@@ -151,19 +151,26 @@ impl DaemonConfig {
     /// Validate configuration values.
     pub fn validate(&self) -> Result<(), String> {
         if let Some(ref mem) = self.backends.memory
-            && mem.enabled && mem.max_pages == 0
+            && mem.enabled
+            && mem.max_pages == 0
         {
             return Err("backends.memory.max_pages must be > 0".to_string());
         }
         if let Some(ref comp) = self.backends.compress
-            && comp.enabled && comp.max_pages == 0
+            && comp.enabled
+            && comp.max_pages == 0
         {
             return Err("backends.compress.max_pages must be > 0".to_string());
         }
         // Validate strategy is a known value
         match self.policy.strategy.as_str() {
             "lru" => {}
-            other => return Err(format!("unknown policy strategy: '{}' (expected 'lru')", other)),
+            other => {
+                return Err(format!(
+                    "unknown policy strategy: '{}' (expected 'lru')",
+                    other
+                ));
+            }
         }
         Ok(())
     }

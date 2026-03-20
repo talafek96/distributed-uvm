@@ -91,7 +91,10 @@ fn handle_client(mut stream: TcpStream, max_pages: u64) -> Result<()> {
         match op[0] {
             OP_ALLOC => {
                 if pages.len() as u64 >= max_pages {
-                    stream.write_all(&[RESP_ERR])?;
+                    // Must send full 9-byte response — client always reads 9 bytes
+                    let mut resp = [0u8; 9];
+                    resp[0] = RESP_ERR;
+                    stream.write_all(&resp)?;
                 } else {
                     let offset = next_offset.fetch_add(1, Ordering::Relaxed);
                     let mut resp = [0u8; 9];

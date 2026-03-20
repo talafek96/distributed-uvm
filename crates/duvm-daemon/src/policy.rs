@@ -105,10 +105,11 @@ impl PolicyEngine {
 
     /// Select the best tier for a new page store, given current backend capacities.
     ///
-    /// Tier preference order (lowest latency first):
+    /// Tier preference order (hardcoded, approximating lowest latency first):
     ///   Compressed → Cxl → Rdma → Gpu → Local
     ///
-    /// If the preferred tier is full, cascade to the next available tier.
+    /// Selects the first tier that has at least one healthy backend with available
+    /// capacity. If no tier qualifies, returns `None`.
     pub fn select_tier(&self, capacities: &[BackendCapacity]) -> Option<Tier> {
         match self.strategy {
             Strategy::Lru => self.select_tier_lru(capacities),
@@ -165,7 +166,11 @@ impl PolicyEngine {
             .collect();
 
         candidates.sort_by_key(|(_, meta)| (meta.last_access, meta.access_count));
-        candidates.into_iter().take(count).map(|(off, _)| off).collect()
+        candidates
+            .into_iter()
+            .take(count)
+            .map(|(off, _)| off)
+            .collect()
     }
 
     /// Number of tracked pages.
@@ -177,7 +182,10 @@ impl PolicyEngine {
     /// Number of tracked pages in a specific backend.
     pub fn pages_in_backend(&self, backend_id: u8) -> usize {
         let pages = self.pages.read();
-        pages.values().filter(|m| m.backend_id == backend_id).count()
+        pages
+            .values()
+            .filter(|m| m.backend_id == backend_id)
+            .count()
     }
 
     /// Set a flag on a page.
