@@ -8,9 +8,9 @@ A middleware that makes remote and heterogeneous memory transparently available 
 ┌─────────────────────────────────────────────────┐
 │  Applications                                   │
 │  ┌──────────────────┐  ┌──────────────────────┐ │
-│  │ Unmodified apps   │  │ Optimized apps       │ │
-│  │ (transparent via  │  │ (use libduvm API)    │ │
-│  │  kernel swap)     │  │                      │ │
+│  │ Unmodified apps  │  │ Optimized apps       │ │
+│  │ (transparent via │  │ (use libduvm API)    │ │
+│  │  kernel swap)    │  │                      │ │
 │  └────────┬─────────┘  └──────────┬───────────┘ │
 ├───────────┼────────────────────────┼─────────────┤
 │ KERNEL    │    duvm-kmod.ko (thin relay)         │
