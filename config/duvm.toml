@@ -1,0 +1,34 @@
+# duvm daemon configuration
+# Copy to /etc/duvm/duvm.toml
+
+[daemon]
+log_level = "info"
+socket_path = "/run/duvm/duvm.sock"
+metrics_port = 9100
+
+[policy]
+strategy = "lru"            # lru | adaptive (planned)
+prefetch_depth = 4          # pages to prefetch ahead on sequential access
+
+[backends.memory]
+enabled = true
+max_pages = 262144          # 1GB of 4KB pages
+
+[backends.compress]
+enabled = true
+max_pages = 262144          # 1GB of 4KB pages
+
+# Uncomment when RDMA hardware is available:
+# [backends.rdma]
+# enabled = true
+# plugin = "libduvm_rdma.so"
+# peers = ["10.0.1.2:4791", "10.0.1.3:4791"]
+# transport = "rc"
+# max_pages = 1048576
+
+# Uncomment when CXL hardware is available:
+# [backends.cxl]
+# enabled = true
+# plugin = "libduvm_cxl.so"
+# dax_device = "/dev/dax0.0"
+# max_pages = 2097152

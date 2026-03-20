@@ -9,6 +9,10 @@ description = "User-space daemon for duvm distributed memory"
 name = "duvm-daemon"
 path = "src/main.rs"
 
+[lib]
+name = "duvm_daemon"
+path = "src/lib.rs"
+
 [dependencies]
 duvm-common = { workspace = true }
 duvm-backend-trait = { workspace = true }

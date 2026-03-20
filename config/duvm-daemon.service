@@ -1,0 +1,26 @@
+[Unit]
+Description=duvm - Distributed Unified Virtual Memory daemon
+After=network.target
+Documentation=https://github.com/distributed-uvm/distributed-uvm
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/duvm-daemon --config /etc/duvm/duvm.toml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/run/duvm
+RuntimeDirectory=duvm
+RuntimeDirectoryMode=0755
+
+# Resource limits
+LimitNOFILE=65536
+LimitMEMLOCK=infinity
+
+[Install]
+WantedBy=multi-user.target

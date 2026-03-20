@@ -2,10 +2,10 @@ use anyhow::Result;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-mod config;
-mod engine;
-mod policy;
-mod uffd;
+pub mod config;
+pub mod engine;
+pub mod policy;
+pub mod uffd;
 
 #[derive(Parser)]
 #[command(name = "duvm-daemon", about = "Distributed UVM daemon")]

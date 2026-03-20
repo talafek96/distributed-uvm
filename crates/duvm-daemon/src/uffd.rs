@@ -178,6 +178,11 @@ impl UffdRegion {
         self.len
     }
 
+    /// Check if the region is empty (zero length).
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
     /// Get the userfaultfd file descriptor (for polling).
     pub fn fd(&self) -> RawFd {
         self.uffd

@@ -86,6 +86,31 @@ make fmt-check    # Check formatting
 make clippy       # Run clippy linter
 ```
 
+### Demos
+
+```bash
+# Run the engine demo (proves full store/load/invalidate data path)
+make demo
+
+# Run the C FFI demo (proves C API works)
+make demo-c
+```
+
+### Benchmarks
+
+```bash
+# Run performance benchmarks (release mode)
+make bench
+```
+
+Sample output (aarch64, release build):
+```
+Memory Backend:  418K store/sec (1.7 GB/s), 6.7M load/sec (27.4 GB/s)
+Compress Backend: 2.0M store/sec (8.1 GB/s), 527K load/sec (2.2 GB/s)
+Ring Buffer:     671M push+pop/sec (1 ns/op)
+Pool (libduvm):  1.1M store/sec, 360K load/sec
+```
+
 ## Project Structure
 
 ```
@@ -101,15 +126,24 @@ distributed-uvm/
 │   ├── duvm-backend-trait/       # Backend plugin interface (trait)
 │   ├── duvm-backend-memory/      # In-memory backend (testing/development)
 │   ├── duvm-backend-compress/    # LZ4 compression backend
-│   ├── duvm-daemon/              # User-space daemon binary
+│   ├── duvm-daemon/              # User-space daemon binary + library
+│   │   └── examples/demo_engine.rs  # Engine demo
 │   ├── duvm-ctl/                 # CLI management tool
 │   ├── libduvm/                  # User-space library (Rust + C FFI)
-│   └── duvm-tests/               # Integration tests
+│   │   └── include/duvm.h        # Auto-generated C header
+│   └── duvm-tests/               # Integration tests + benchmarks
 │
 ├── duvm-kmod/                    # Linux kernel module (C)
 │   ├── Makefile
 │   ├── include/duvm_kmod.h
 │   └── src/{main,ring,swap}.c
+│
+├── examples/
+│   └── demo_c_ffi.c             # C FFI demo program
+│
+├── config/
+│   ├── duvm.toml                 # Example configuration
+│   └── duvm-daemon.service       # systemd unit file
 │
 └── research/                     # Architecture design documents
     ├── prior-art.md              # 20+ existing solutions analyzed
@@ -284,10 +318,13 @@ Each level degrades performance, never correctness.
 make help           # Show all targets
 make build          # Build (debug)
 make release        # Build (optimized)
-make test           # Run all 42 tests
+make test           # Run all 54 tests
 make clippy         # Lint with clippy
 make fmt            # Format code
 make check          # format + lint + test
+make demo           # Run engine demo
+make demo-c         # Run C FFI demo
+make bench          # Run performance benchmarks
 make kmod           # Build kernel module
 make doc            # Generate docs
 make install        # Install binaries

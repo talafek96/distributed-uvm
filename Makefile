@@ -34,10 +34,23 @@ test-unit: ## Run unit tests only
 	$(CARGO) test --lib
 
 test-integration: ## Run integration tests only
-	$(CARGO) test --test integration
+	$(CARGO) test --test integration -p duvm-tests
 
 test-verbose: ## Run all tests with verbose output
 	$(CARGO) test -- --nocapture
+
+##@ Demos & Benchmarks
+
+demo: build ## Run the engine demo (proves full data path works)
+	$(CARGO) run --example demo_engine -p duvm-daemon
+
+demo-c: release ## Build and run C FFI demo
+	gcc -o target/demo_c_ffi examples/demo_c_ffi.c \
+		-I crates/libduvm/include -L target/release -lduvm -lpthread -ldl -lm
+	LD_LIBRARY_PATH=target/release ./target/demo_c_ffi
+
+bench: ## Run benchmarks (release mode, with output)
+	$(CARGO) test --test bench --release -p duvm-tests -- --nocapture
 
 ##@ Quality
 

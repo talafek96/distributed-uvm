@@ -10,6 +10,10 @@ publish = false
 name = "integration"
 path = "tests/integration_test.rs"
 
+[[test]]
+name = "bench"
+path = "tests/bench.rs"
+
 [dependencies]
 duvm-common = { workspace = true }
 duvm-backend-trait = { workspace = true }
