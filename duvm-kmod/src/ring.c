@@ -1,160 +1,184 @@
 /*
- * ring.c - Lock-free SPSC ring buffer for kernel-daemon communication.
+ * ring.c - Shared ring buffer for kernel-daemon communication.
  *
- * The ring buffer is allocated as contiguous kernel memory and can be
- * mmap'd into the daemon's address space. Communication uses memory
- * barriers (smp_wmb/smp_rmb) instead of locks.
+ * Allocates a contiguous set of pages that can be mapped into both
+ * kernel space and user space (daemon). Uses lock-free SPSC protocol
+ * with memory barriers.
+ *
+ * Memory layout (all page-aligned):
+ *   [ring_header]          - 1 page
+ *   [request entries]      - ceil(capacity * 64 / PAGE_SIZE) pages
+ *   [completion entries]   - ceil(capacity * 64 / PAGE_SIZE) pages
+ *   [staging buffer]       - staging_pages pages
  */
 
 #include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/gfp.h>
+#include <linux/vmalloc.h>
 #include <linux/wait.h>
 #include <linux/sched.h>
 #include <linux/log2.h>
 
 #include "duvm_kmod.h"
 
-/*
- * Initialize the ring buffer.
- *
- * Allocates a contiguous region containing:
- *   - Ring header (struct duvm_ring_header)
- *   - Request entries (capacity * sizeof(struct duvm_request))
- *   - Completion entries (capacity * sizeof(struct duvm_completion))
- *   - Staging buffer (staging_pages * PAGE_SIZE)
- */
 int duvm_ring_init(struct duvm_ring *ring, unsigned int capacity,
                    unsigned long staging_pg)
 {
-    size_t header_size, req_size, comp_size, staging_size, total_size;
-    unsigned int order;
-    void *buf;
+    size_t header_sz, req_sz, comp_sz, staging_sz, total_sz;
+    unsigned int total_pages, i;
+    struct page **pages;
+    void *vaddr;
 
-    header_size  = PAGE_ALIGN(sizeof(struct duvm_ring_header));
-    req_size     = PAGE_ALIGN(capacity * sizeof(struct duvm_request));
-    comp_size    = PAGE_ALIGN(capacity * sizeof(struct duvm_completion));
-    staging_size = staging_pg * PAGE_SIZE;
-    total_size   = header_size + req_size + comp_size + staging_size;
+    header_sz   = PAGE_SIZE;  /* 1 page for header */
+    req_sz      = PAGE_ALIGN(capacity * sizeof(struct duvm_request));
+    comp_sz     = PAGE_ALIGN(capacity * sizeof(struct duvm_completion));
+    staging_sz  = staging_pg * PAGE_SIZE;
+    total_sz    = header_sz + req_sz + comp_sz + staging_sz;
+    total_pages = total_sz / PAGE_SIZE;
 
-    /* Allocate contiguous pages */
-    order = get_order(total_size);
-    if (order > MAX_PAGE_ORDER) {
-        pr_err("duvm: ring buffer too large (order %u > %d)\n",
-               order, MAX_PAGE_ORDER);
+    pr_info("duvm: ring init: capacity=%u, staging=%lu pages, total=%u pages (%zu bytes)\n",
+            capacity, staging_pg, total_pages, total_sz);
+
+    /* Allocate page array */
+    pages = kvmalloc_array(total_pages, sizeof(struct page *), GFP_KERNEL);
+    if (!pages)
         return -ENOMEM;
+
+    /* Allocate individual pages (allows mmap via vm_insert_page) */
+    for (i = 0; i < total_pages; i++) {
+        pages[i] = alloc_page(GFP_KERNEL | __GFP_ZERO);
+        if (!pages[i]) {
+            pr_err("duvm: failed to allocate ring page %u/%u\n", i, total_pages);
+            goto err_free_pages;
+        }
     }
 
-    buf = (void *)__get_free_pages(GFP_KERNEL | __GFP_ZERO, order);
-    if (!buf) {
-        pr_err("duvm: failed to allocate ring buffer (%zu bytes)\n",
-               total_size);
-        return -ENOMEM;
+    /* Map all pages contiguously into kernel virtual address space */
+    vaddr = vmap(pages, total_pages, VM_MAP, PAGE_KERNEL);
+    if (!vaddr) {
+        pr_err("duvm: vmap failed for %u pages\n", total_pages);
+        goto err_free_pages;
     }
 
-    ring->ring_page    = virt_to_page(buf);
-    ring->ring_size    = (1UL << order) * PAGE_SIZE;
-    ring->header       = (struct duvm_ring_header *)buf;
-    ring->requests     = (struct duvm_request *)((char *)buf + header_size);
-    ring->completions  = (struct duvm_completion *)((char *)buf + header_size + req_size);
-    ring->staging      = (char *)buf + header_size + req_size + comp_size;
+    ring->ring_pages    = pages;
+    ring->nr_ring_pages = total_pages;
+    ring->ring_size     = total_sz;
+
+    /* Set up pointers into the mapped region */
+    ring->header      = (struct duvm_ring_header *)vaddr;
+    ring->requests    = (struct duvm_request *)((char *)vaddr + header_sz);
+    ring->completions = (struct duvm_completion *)((char *)vaddr + header_sz + req_sz);
+    ring->staging     = (char *)vaddr + header_sz + req_sz + comp_sz;
     ring->staging_pages = staging_pg;
 
     /* Initialize header */
-    ring->header->write_idx = 0;
-    ring->header->read_idx  = 0;
-    ring->header->capacity  = capacity;
-    ring->header->version   = 1;
+    ring->header->req_write_idx  = 0;
+    ring->header->req_read_idx   = 0;
+    ring->header->comp_write_idx = 0;
+    ring->header->comp_read_idx  = 0;
+    ring->header->capacity       = capacity;
+    ring->header->version        = 2;  /* v2 = block device model */
+    ring->header->staging_pages  = staging_pg;
 
     atomic_set(&ring->seq_counter, 0);
-    init_waitqueue_head(&ring->wait_queue);
+    init_waitqueue_head(&ring->comp_wait);
     ring->daemon_connected = false;
 
-    pr_info("duvm: ring buffer initialized (capacity=%u, staging=%lu pages, "
-            "total=%zu bytes, order=%u)\n",
-            capacity, staging_pg, total_size, order);
+    pr_info("duvm: ring buffer initialized (%u pages, %zu bytes)\n",
+            total_pages, total_sz);
     return 0;
+
+err_free_pages:
+    while (i-- > 0)
+        __free_page(pages[i]);
+    kvfree(pages);
+    return -ENOMEM;
 }
 
 void duvm_ring_destroy(struct duvm_ring *ring)
 {
-    if (ring->header) {
-        unsigned int order = get_order(ring->ring_size);
-        free_pages((unsigned long)ring->header, order);
-        ring->header = NULL;
+    unsigned int i;
+
+    if (!ring->ring_pages)
+        return;
+
+    /* Unmap virtual address */
+    if (ring->header)
+        vunmap(ring->header);
+
+    /* Free individual pages */
+    for (i = 0; i < ring->nr_ring_pages; i++) {
+        if (ring->ring_pages[i])
+            __free_page(ring->ring_pages[i]);
     }
+
+    kvfree(ring->ring_pages);
+    ring->ring_pages = NULL;
+    ring->header = NULL;
 }
 
 /*
- * Submit a request to the ring buffer (kernel side, non-blocking).
+ * Submit a request and wait for the matching completion.
  *
- * Returns 0 on success, -EAGAIN if ring is full, -ENODEV if daemon
- * is not connected.
+ * This is the synchronous path used by the block device for swap I/O.
+ * For async operation, the daemon polls the request ring and writes
+ * completions independently.
+ *
+ * Returns 0 on success, negative errno on failure.
  */
-int duvm_ring_submit(struct duvm_ring *ring, struct duvm_request *req)
+int duvm_ring_submit_and_wait(struct duvm_ring *ring,
+                              struct duvm_request *req,
+                              struct duvm_completion *comp,
+                              int timeout_ms)
 {
-    __u32 capacity, mask, write_idx, next_write, read_idx;
+    __u32 capacity, mask, write_idx, next_write;
+    __u32 seq;
+    long timeout_jiffies;
+    long ret;
 
     if (!ring->daemon_connected)
         return -ENODEV;
 
     capacity  = ring->header->capacity;
     mask      = capacity - 1;
-    write_idx = ring->header->write_idx;
-    read_idx  = READ_ONCE(ring->header->read_idx);
+    write_idx = ring->header->req_write_idx;
     next_write = (write_idx + 1) & mask;
 
-    if (next_write == read_idx)
-        return -EAGAIN;  /* ring full */
+    /* Check if ring is full */
+    if (next_write == READ_ONCE(ring->header->req_read_idx))
+        return -EAGAIN;
 
     /* Assign sequence number */
-    req->seq = atomic_inc_return(&ring->seq_counter);
+    seq = atomic_inc_return(&ring->seq_counter);
+    req->seq = seq;
 
-    /* Write request entry */
+    /* Write request to ring */
     memcpy(&ring->requests[write_idx], req, sizeof(*req));
 
-    /* Memory barrier: ensure request data is visible before updating index */
+    /* Barrier: ensure request data visible before updating index */
     smp_wmb();
+    WRITE_ONCE(ring->header->req_write_idx, next_write);
 
-    WRITE_ONCE(ring->header->write_idx, next_write);
-
-    /* Wake daemon if it's polling */
-    wake_up(&ring->wait_queue);
-
-    return 0;
-}
-
-/*
- * Wait for a completion with matching sequence number.
- * Used for synchronous operations (e.g., page load that must block).
- *
- * Returns 0 on success, -ETIMEDOUT on timeout, -ENODEV if daemon disconnects.
- */
-int duvm_ring_wait_completion(struct duvm_ring *ring, __u32 seq,
-                              struct duvm_completion *comp, int timeout_ms)
-{
-    long timeout_jiffies = msecs_to_jiffies(timeout_ms);
-    long ret;
-
-    /*
-     * Simple polling approach for now. In production, the daemon writes
-     * completions and signals via eventfd. Here we poll the completion ring.
-     */
-    ret = wait_event_timeout(ring->wait_queue,
+    /* Wait for matching completion */
+    timeout_jiffies = msecs_to_jiffies(timeout_ms);
+    ret = wait_event_timeout(ring->comp_wait,
         ({
-            __u32 mask = ring->header->capacity - 1;
-            __u32 read_idx = ring->header->read_idx;
-            __u32 write_idx = READ_ONCE(ring->header->write_idx);
             bool found = false;
-            __u32 idx = read_idx;
-            while (idx != write_idx) {
+            __u32 cidx = ring->header->comp_read_idx;
+            __u32 cwrite = READ_ONCE(ring->header->comp_write_idx);
+
+            while (cidx != cwrite) {
                 smp_rmb();
-                if (ring->completions[idx].seq == seq) {
-                    memcpy(comp, &ring->completions[idx], sizeof(*comp));
+                if (ring->completions[cidx].seq == seq) {
+                    memcpy(comp, &ring->completions[cidx], sizeof(*comp));
+                    /* Advance read index past this completion */
+                    WRITE_ONCE(ring->header->comp_read_idx,
+                               (cidx + 1) & mask);
                     found = true;
                     break;
                 }
-                idx = (idx + 1) & mask;
+                cidx = (cidx + 1) & mask;
             }
             found || !ring->daemon_connected;
         }),
@@ -164,5 +188,6 @@ int duvm_ring_wait_completion(struct duvm_ring *ring, __u32 seq,
         return -ENODEV;
     if (ret == 0)
         return -ETIMEDOUT;
-    return 0;
+
+    return comp->result;
 }
