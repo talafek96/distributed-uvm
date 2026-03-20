@@ -14,10 +14,15 @@ path = "tests/integration_test.rs"
 name = "bench"
 path = "tests/bench.rs"
 
+[[test]]
+name = "tcp_integration"
+path = "tests/tcp_integration.rs"
+
 [dependencies]
 duvm-common = { workspace = true }
 duvm-backend-trait = { workspace = true }
 duvm-backend-memory = { workspace = true }
 duvm-backend-compress = { workspace = true }
+duvm-backend-tcp = { workspace = true }
 libduvm = { workspace = true }
 bytemuck = { workspace = true }
