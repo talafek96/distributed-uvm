@@ -1,10 +1,10 @@
 # Build artifacts
 /target/
-duvm-kmod/*.o
-duvm-kmod/*.ko
-duvm-kmod/*.mod
-duvm-kmod/*.mod.c
-duvm-kmod/.*.cmd
+duvm-kmod/**/*.o
+duvm-kmod/**/*.ko
+duvm-kmod/**/*.mod
+duvm-kmod/**/*.mod.c
+duvm-kmod/**/.*.cmd
 duvm-kmod/Module.symvers
 duvm-kmod/modules.order
 duvm-kmod/.tmp_versions/
