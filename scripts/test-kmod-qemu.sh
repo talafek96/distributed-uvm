@@ -66,22 +66,53 @@ else
         mkdir -p "$EXTRACT_DIR"
         dpkg-deb -x "$DEB_FILE" "$EXTRACT_DIR"
         VMLINUZ="$EXTRACT_DIR/boot/vmlinuz-$KVER"
+        echo "  vmlinuz type: $(file "$VMLINUZ")"
 
-        # Find extract-vmlinux script (location varies by kernel flavour)
+        EXTRACTED=false
+
+        # Method 1: extract-vmlinux script (works for standard compressed kernels)
         EXTRACT_SCRIPT="$(find /usr/src -name extract-vmlinux -print -quit 2>/dev/null || true)"
-        if [[ -z "$EXTRACT_SCRIPT" ]]; then
-            echo "  FAIL: extract-vmlinux script not found under /usr/src"
+        if [[ -n "$EXTRACT_SCRIPT" ]] && "$EXTRACT_SCRIPT" "$VMLINUZ" > "$KERNEL" 2>/dev/null; then
+            if file "$KERNEL" | grep -q "ARM64 boot executable"; then
+                EXTRACTED=true
+            fi
+        fi
+
+        # Method 2: EFI stub kernels — extract .linux section via objcopy
+        if [[ "$EXTRACTED" = false ]] && command -v objcopy &>/dev/null; then
+            echo "  Trying EFI stub extraction via objcopy..."
+            objcopy -O binary -j .linux "$VMLINUZ" "$KERNEL" 2>/dev/null || true
+            if [[ -s "$KERNEL" ]] && file "$KERNEL" | grep -q "ARM64 boot executable"; then
+                EXTRACTED=true
+            fi
+        fi
+
+        # Method 3: raw decompression of the PE payload
+        if [[ "$EXTRACTED" = false ]]; then
+            echo "  Trying direct decompression (gzip/lz4/zstd)..."
+            for decomp in zcat lz4cat zstdcat xzcat; do
+                if command -v "$decomp" &>/dev/null; then
+                    $decomp "$VMLINUZ" > "$KERNEL" 2>/dev/null || true
+                    if [[ -s "$KERNEL" ]] && file "$KERNEL" | grep -q "ARM64 boot executable"; then
+                        EXTRACTED=true
+                        break
+                    fi
+                fi
+            done
+        fi
+
+        if [[ "$EXTRACTED" = false ]]; then
+            echo "  FAIL: Could not extract ARM64 kernel image from $VMLINUZ"
+            echo "  vmlinuz file type: $(file "$VMLINUZ")"
+            [[ -f "$KERNEL" ]] && echo "  extracted file type: $(file "$KERNEL")"
             exit 1
         fi
-        "$EXTRACT_SCRIPT" "$VMLINUZ" > "$KERNEL" 2>/dev/null || {
-            echo "  FAIL: extract-vmlinux could not decompress $VMLINUZ"
-            exit 1
-        }
     fi
 fi
 
 file "$KERNEL" | grep -q "ARM64 boot executable" || {
     echo "  FAIL: $KERNEL is not an ARM64 kernel image"
+    echo "  Got: $(file "$KERNEL")"
     exit 1
 }
 echo "  OK: $(file "$KERNEL" | cut -d: -f2 | xargs)"

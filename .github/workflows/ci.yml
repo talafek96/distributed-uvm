@@ -64,8 +64,10 @@ jobs:
             busybox-static \
             linux-headers-$(uname -r) \
             build-essential \
+            binutils \
             cpio \
             gzip \
+            zstd \
             file
       - name: Run QEMU system test
         run: bash scripts/test-kmod-qemu.sh
