@@ -2,13 +2,25 @@
 
 ## What This Is
 
-**duvm** (Distributed Unified Virtual Memory) — a middleware that makes remote and heterogeneous memory transparently available to unmodified applications. Sits between applications and pluggable memory backends (RDMA, CXL, NVLink, compressed local).
+**duvm** (Distributed Unified Virtual Memory) — middleware that makes remote and heterogeneous memory transparently available to unmodified applications. Sits between applications and pluggable memory backends (RDMA, CXL, NVLink, compressed local).
 
 ## Current State
 
-**Phase: Implementation Phase 1 (in progress — core framework complete)**
+**Phase: Implementation — core framework complete, transparent page faults proven, cross-machine memory proven**
 
-### What's Built
+### What Works (Proven)
+
+| What | Evidence | Command |
+|---|---|---|
+| Engine data path (store/load/invalidate) | 1000 pages through LZ4 backend, all verified | `make demo` |
+| Cross-machine memory (calc1 ↔ calc2) | 10,000 pages over ConnectX-7, byte-perfect | `cargo run --example demo_distributed --release -p duvm-daemon` |
+| Transparent page fault handling | 256 pages via userfaultfd, 22us/fault, zero errors | `cargo run --example demo_uffd --release -p duvm-daemon` |
+| C FFI | 100 pages round-tripped from C program | `make demo-c` |
+| Kernel module | Compiles as virtual block device for Linux 6.17 | `make kmod` |
+| Test suite | 60 tests passing | `make test` |
+| Code quality | clippy -D warnings clean, rustfmt clean | `make check` |
+
+### Components
 
 | Component | Status | Location |
 |---|---|---|
@@ -16,74 +28,63 @@
 | **duvm-backend-trait** | Complete | `crates/duvm-backend-trait/` — Backend plugin interface |
 | **duvm-backend-memory** | Complete | `crates/duvm-backend-memory/` — In-memory reference backend |
 | **duvm-backend-compress** | Complete | `crates/duvm-backend-compress/` — LZ4 compression backend |
-| **duvm-daemon** | Complete | `crates/duvm-daemon/` — Policy engine, backend management, Unix socket control |
+| **duvm-backend-tcp** | Complete | `crates/duvm-backend-tcp/` — TCP remote memory backend |
+| **duvm-daemon** | Complete | `crates/duvm-daemon/` — Policy, backends, control socket, uffd |
 | **duvm-ctl** | Complete | `crates/duvm-ctl/` — CLI tool (status, stats, backends, ping) |
-| **libduvm** | Complete | `crates/libduvm/` — Rust API + C FFI (cbindgen-generated header) |
-| **duvm-kmod** | Complete | `duvm-kmod/` — Kernel module compiles against Linux 6.17 |
-| **Integration tests** | Complete | `crates/duvm-tests/` — 9 integration tests |
+| **duvm-memserver** | Complete | `crates/duvm-memserver/` — Remote memory server binary |
+| **libduvm** | Complete | `crates/libduvm/` — Rust API + C FFI |
+| **duvm-kmod** | Compiles | `duvm-kmod/` — Virtual block device swap target |
 
-### Quality Gates
+### Hardware Tested On
 
-All pass:
-- `cargo fmt --check` — clean
-- `cargo clippy -D warnings` — zero warnings
-- `cargo test` — **42 tests passing** (33 unit + 9 integration)
-- `make kmod` — kernel module compiles (`duvm-kmod.ko`)
-
-### Documents
-
-| Document | Purpose |
-|---|---|
-| `README.md` | User-facing guide: quick start, project structure, crate guide, config |
-| `research/prior-art.md` | Landscape of 20+ existing solutions |
-| `research/gap-analysis.md` | Analysis of the specific gap this project fills |
-| `research/architecture-options.md` | Five candidate architectures evaluated with pros/cons |
-| `research/architecture.md` | Complete architecture design for the chosen approach |
+- 2x NVIDIA DGX Spark (128GB unified LPDDR5X each)
+- 4x ConnectX-7 200Gbps RoCE direct cables
+- aarch64, Linux 6.17.0-1008-nvidia, CUDA 13.0
 
 ## How to Build and Test
 
 ```bash
 make build          # Build all Rust crates
-make test           # Run all 42 tests
+make test           # Run all 60 tests
 make check          # Format + lint + test
 make kmod           # Build kernel module
+make demo           # Engine demo
+make demo-c         # C FFI demo
+make bench          # Performance benchmarks
+bash scripts/preflight.sh  # Verify all prerequisites
+```
+
+## Prerequisites
+
+```bash
+# Required on compute nodes (where apps run):
+sudo sysctl -w vm.unprivileged_userfaultfd=1
+echo "vm.unprivileged_userfaultfd=1" | sudo tee /etc/sysctl.d/90-duvm.conf
+
+# Required for kernel module (optional, for best performance):
+sudo apt install linux-headers-$(uname -r)
+
+# Required for QEMU testing (optional, for safe kmod development):
+sudo apt install qemu-system-arm qemu-utils
 ```
 
 ## What's Next
 
-Implementation Phase 1 (remaining):
-- [ ] Wire userfaultfd path into daemon for end-to-end transparent page fault handling
-- [ ] Kernel module swap hooks (frontswap/zswap, currently stub)
-- [ ] RDMA backend plugin
-- [ ] Integration test: redis with dataset > local RAM, overflow to remote memory
-
-Implementation Phase 2:
-- [ ] CXL backend plugin
-- [ ] CLOCK-Pro hotness tracking (currently LRU)
-- [ ] Background migration between tiers
-- [ ] Prefetching (sequential + strided)
-- [ ] Prometheus metrics endpoint
+Remaining for production:
+- [ ] Wire userfaultfd handler to TCP backend (currently uses local pattern fill)
+- [ ] Kernel module: test insmod + mkswap + swapon in QEMU VM
+- [ ] Symmetric deployment: every node runs daemon + memserver
+- [ ] Install script hardening and testing
+- [ ] RDMA backend (libibverbs, bypasses TCP for 200Gbps wire-rate)
 
 ## Key Technical Decisions
 
+See `research/decisions.md` for full rationale.
+
 | Decision | Choice | Why |
 |---|---|---|
-| Interception mechanism | frontswap / swap backend in kernel | userfaultfd adds 5-8us overhead — unacceptable for CXL-class latencies (200-400ns) |
-| Daemon language | Rust | Memory safety without GC; no GC pauses in the memory manager itself |
-| Kernel-user communication | Lock-free shared ring buffer | io_uring-style design, <2us round-trip |
-| Backend interface | Trait-based plugins | Runtime-loadable, independently developed, ~500 LoC each |
-| Policy | LRU now, CLOCK-Pro planned | Start simple, upgrade when multi-tier placement matters |
-| Kernel module | Thin relay, no policy | All complexity in user-space; module is ~300 LoC C |
-| Fault tolerance | Erasure coding for RDMA (planned) | Carbink-inspired, configurable redundancy per tier |
-
-## Key References
-
-| Name | Relevance | URL |
-|---|---|---|
-| Infiniswap | Transparent RDMA swap (validates frontswap approach) | https://github.com/SymbioticLab/Infiniswap |
-| ODRP | Frontswap + SmartNIC offloading (NSDI '25) | https://github.com/SJTU-IPADS/On-Demand-Remote-Paging |
-| AIFM | Object-level far memory API (informs libduvm design) | https://github.com/AIFM-sys/AIFM |
-| PageFlex | eBPF page fault delegation (future policy path) | USENIX ATC '25 |
-| Peter Xu uffd-wp measurements | userfaultfd latency data | https://xzpeter.org/userfaultfd-wp-latency-measurements/ |
-| Linux frontswap docs | Kernel swap backend API | https://www.kernel.org/doc/html/next/mm/frontswap.html |
-| CXL DAX driver docs | CXL memory mapping | https://docs.kernel.org/driver-api/cxl/allocation/dax.html |
+| Swap interception | Virtual block device (not frontswap) | frontswap removed in Linux 6.17; block device uses stable blk-mq API |
+| Architecture | Symmetric — every node is compute + memory | User requirement: all nodes equal |
+| Fallback mode | userfaultfd (C helper for aarch64 ABI) | Works without kernel module; proven at 22us/fault |
+| Development safety | QEMU/KVM for kernel module testing | Crashes don't affect host |
+| Kernel module dev | calc2 for hardware integration testing | Two identical machines available |
