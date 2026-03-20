@@ -41,12 +41,13 @@ else
     DEB_NAME="linux-image-${KVER}"
     DEB_FILE="$WORKDIR/kernel.deb"
 
-    # Download if needed
-    apt download "$DEB_NAME" -o Dir::Cache::archives="$WORKDIR" 2>/dev/null || {
+    # Download into $WORKDIR so we know where the .deb lands
+    (cd "$WORKDIR" && apt download "$DEB_NAME") 2>/dev/null || {
         echo "  SKIP: Cannot download kernel package. Trying /boot..."
         # Try to copy from /boot if readable
         if [[ -r "/boot/vmlinuz-$KVER" ]]; then
-            /usr/src/linux-headers-$KVER/scripts/extract-vmlinux "/boot/vmlinuz-$KVER" > "$KERNEL" 2>/dev/null
+            BOOT_EXTRACT="$(find /usr/src -name extract-vmlinux -print -quit 2>/dev/null || true)"
+            [[ -n "$BOOT_EXTRACT" ]] && "$BOOT_EXTRACT" "/boot/vmlinuz-$KVER" > "$KERNEL" 2>/dev/null
         else
             echo "  FAIL: Cannot access kernel image. Need either:"
             echo "    - apt download access for $DEB_NAME"
@@ -56,15 +57,26 @@ else
     }
 
     if [[ ! -f "$KERNEL" ]]; then
-        DEB_FILE=$(ls "$WORKDIR"/*.deb 2>/dev/null | head -1)
+        DEB_FILE="$(find "$WORKDIR" -maxdepth 1 -name '*.deb' -print -quit)"
         if [[ -z "$DEB_FILE" ]]; then
-            DEB_FILE=$(ls "${DEB_NAME}"*.deb 2>/dev/null | head -1)
+            echo "  FAIL: No .deb found in $WORKDIR after apt download"
+            exit 1
         fi
         EXTRACT_DIR="$WORKDIR/deb-extract"
         mkdir -p "$EXTRACT_DIR"
         dpkg-deb -x "$DEB_FILE" "$EXTRACT_DIR"
         VMLINUZ="$EXTRACT_DIR/boot/vmlinuz-$KVER"
-        /usr/src/linux-headers-$KVER/scripts/extract-vmlinux "$VMLINUZ" > "$KERNEL" 2>/dev/null
+
+        # Find extract-vmlinux script (location varies by kernel flavour)
+        EXTRACT_SCRIPT="$(find /usr/src -name extract-vmlinux -print -quit 2>/dev/null || true)"
+        if [[ -z "$EXTRACT_SCRIPT" ]]; then
+            echo "  FAIL: extract-vmlinux script not found under /usr/src"
+            exit 1
+        fi
+        "$EXTRACT_SCRIPT" "$VMLINUZ" > "$KERNEL" 2>/dev/null || {
+            echo "  FAIL: extract-vmlinux could not decompress $VMLINUZ"
+            exit 1
+        }
     fi
 fi
 
