@@ -48,6 +48,7 @@ MODULE_PARM_DESC(ring_entries, "Ring buffer entries, power of 2 (default 4096)")
 
 /* Global device state */
 static struct duvm_device duvm_dev;
+static int duvm_major;
 
 /*
  * Fallback: in-memory page storage for when daemon is not connected.
@@ -133,6 +134,14 @@ static const struct blk_mq_ops duvm_mq_ops = {
 };
 
 /*
+ * Block device operations for /dev/duvm_swap0.
+ * Minimal — the actual I/O is handled by blk-mq queue_rq callback.
+ */
+static const struct block_device_operations duvm_bdev_fops = {
+    .owner = THIS_MODULE,
+};
+
+/*
  * Control device (/dev/duvm_ctl) file operations.
  * The daemon opens this to mmap the ring buffer.
  */
@@ -207,11 +216,19 @@ static int __init duvm_init(void)
     memset(&duvm_dev, 0, sizeof(duvm_dev));
     duvm_dev.size_pages = (unsigned long)size_mb * 256; /* MB to 4K pages */
 
+    /* Register block device major number */
+    duvm_major = register_blkdev(0, DUVM_DEVICE_NAME);
+    if (duvm_major < 0) {
+        pr_err("duvm: register_blkdev failed: %d\n", duvm_major);
+        return duvm_major;
+    }
+    pr_info("duvm: registered block device major=%d\n", duvm_major);
+
     /* Initialize ring buffer */
     ret = duvm_ring_init(&duvm_dev.ring, ring_entries, ring_entries);
     if (ret) {
         pr_err("duvm: ring init failed: %d\n", ret);
-        return ret;
+        goto err_blkdev;
     }
 
     /* Set up blk-mq tag set */
@@ -232,21 +249,28 @@ static int __init duvm_init(void)
     lim.logical_block_size = DUVM_SECTOR_SIZE;
     lim.physical_block_size = PAGE_SIZE;
     lim.max_hw_sectors = PAGE_SIZE / DUVM_SECTOR_SIZE * 32; /* 32 pages per request */
+    lim.features = BLK_FEAT_SYNCHRONOUS;
 
-    duvm_dev.disk = blk_mq_alloc_disk(&duvm_dev.tag_set, &lim, NULL);
+    duvm_dev.disk = blk_mq_alloc_disk(&duvm_dev.tag_set, &lim, &duvm_dev);
     if (IS_ERR(duvm_dev.disk)) {
         ret = PTR_ERR(duvm_dev.disk);
         pr_err("duvm: disk alloc failed: %d\n", ret);
         goto err_tag_set;
     }
 
-    /* Configure disk — fops are set by blk_mq_alloc_disk, no override needed */
-    duvm_dev.disk->major = 0; /* auto-assign */
+    pr_info("duvm: blk_mq_alloc_disk succeeded, configuring...\n");
+
+    /* Configure disk */
+    duvm_dev.disk->major = duvm_major;
     duvm_dev.disk->first_minor = 0;
     duvm_dev.disk->minors = 1;
+    duvm_dev.disk->fops = &duvm_bdev_fops;
     snprintf(duvm_dev.disk->disk_name, DISK_NAME_LEN, "%s0", DUVM_DEVICE_NAME);
     set_capacity(duvm_dev.disk,
                  duvm_dev.size_pages * DUVM_PAGE_SECTORS);
+
+    pr_info("duvm: calling add_disk (capacity=%lu sectors)...\n",
+            duvm_dev.size_pages * DUVM_PAGE_SECTORS);
 
     /* Register disk */
     ret = add_disk(duvm_dev.disk);
@@ -282,6 +306,8 @@ err_tag_set:
     blk_mq_free_tag_set(&duvm_dev.tag_set);
 err_ring:
     duvm_ring_destroy(&duvm_dev.ring);
+err_blkdev:
+    unregister_blkdev(duvm_major, DUVM_DEVICE_NAME);
     return ret;
 }
 
@@ -297,6 +323,7 @@ static void __exit duvm_exit(void)
     put_disk(duvm_dev.disk);
     blk_mq_free_tag_set(&duvm_dev.tag_set);
     duvm_ring_destroy(&duvm_dev.ring);
+    unregister_blkdev(duvm_major, DUVM_DEVICE_NAME);
 
     /* Free all stored pages */
     xa_for_each(&duvm_page_store, idx, page) {
