@@ -1,0 +1,36 @@
+name: Branch name check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches-ignore: [main]
+
+jobs:
+  check-branch-name:
+    name: Validate branch name
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check branch name convention
+        run: |
+          BRANCH="${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
+          echo "Checking branch name: $BRANCH"
+
+          # Allowed patterns:
+          #   main
+          #   usr/<github_username>/<topic>
+          #   pvt/<topic>
+          #   pub/<topic>
+          PATTERN='^(main|usr/[a-zA-Z0-9_.-]+/[a-zA-Z0-9_/.-]+|pvt/[a-zA-Z0-9_/.-]+|pub/[a-zA-Z0-9_/.-]+)$'
+
+          if [[ "$BRANCH" =~ $PATTERN ]]; then
+            echo "Branch name '$BRANCH' is valid."
+          else
+            echo "::error::Invalid branch name '$BRANCH'."
+            echo "Allowed patterns:"
+            echo "  main"
+            echo "  usr/<github_username>/<branch_topic>"
+            echo "  pvt/<branch_topic>"
+            echo "  pub/<branch_topic>"
+            exit 1
+          fi
