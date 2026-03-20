@@ -25,6 +25,7 @@ duvm-backend-trait = { path = "crates/duvm-backend-trait" }
 duvm-backend-memory = { path = "crates/duvm-backend-memory" }
 duvm-backend-compress = { path = "crates/duvm-backend-compress" }
 duvm-backend-tcp = { path = "crates/duvm-backend-tcp" }
+duvm-daemon = { path = "crates/duvm-daemon" }
 libduvm = { path = "crates/libduvm" }
 
 anyhow = "1"

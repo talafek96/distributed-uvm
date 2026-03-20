@@ -18,11 +18,19 @@ path = "tests/bench.rs"
 name = "tcp_integration"
 path = "tests/tcp_integration.rs"
 
+[[test]]
+name = "comprehensive"
+path = "tests/comprehensive_test.rs"
+
 [dependencies]
 duvm-common = { workspace = true }
 duvm-backend-trait = { workspace = true }
 duvm-backend-memory = { workspace = true }
 duvm-backend-compress = { workspace = true }
 duvm-backend-tcp = { workspace = true }
+duvm-daemon = { workspace = true }
 libduvm = { workspace = true }
 bytemuck = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+toml = { workspace = true }
+serde_json = { workspace = true }

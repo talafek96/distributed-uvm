@@ -19,6 +19,7 @@ duvm-backend-trait = { workspace = true }
 duvm-backend-memory = { workspace = true }
 duvm-backend-compress = { workspace = true }
 duvm-backend-tcp = { workspace = true }
+libduvm = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
@@ -31,6 +32,7 @@ tokio = { workspace = true }
 libc = { workspace = true }
 nix = { workspace = true }
 parking_lot = { workspace = true }
+bytemuck = { workspace = true }
 
 [build-dependencies]
 cc = "1"

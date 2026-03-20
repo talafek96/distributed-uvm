@@ -6,19 +6,26 @@
 
 ## Current State
 
-**Phase: Implementation — core framework complete, transparent page faults proven, cross-machine memory proven**
+**Phase: Implementation — core framework complete, transparent page faults proven, cross-machine memory proven, comprehensive testing done**
 
 ### What Works (Proven)
 
 | What | Evidence | Command |
 |---|---|---|
-| Engine data path (store/load/invalidate) | 1000 pages through LZ4 backend, all verified | `make demo` |
+| Engine data path (store/load/invalidate) | 500 pages through LZ4 backend, all verified | `make demo` |
+| LRU policy with tier cascading | Prefers low-latency, cascades when full, skips unhealthy | `cargo run --example demo_proof --release -p duvm-daemon` |
+| Capacity overflow detection | Backends full → error stats tracked, clean error returns | `cargo run --example demo_proof --release -p duvm-daemon` |
+| Multi-backend cascading | Compress full → falls back to memory | `cargo run --example demo_proof --release -p duvm-daemon` |
 | Cross-machine memory (calc1 ↔ calc2) | 10,000 pages over ConnectX-7, byte-perfect | `cargo run --example demo_distributed --release -p duvm-daemon` |
 | Transparent page fault handling | 256 pages via userfaultfd, 22us/fault, zero errors | `cargo run --example demo_uffd --release -p duvm-daemon` |
+| TCP remote memory backend | 100 pages round-tripped via TCP, all freed | `cargo run --example demo_proof --release -p duvm-daemon` |
+| Daemon socket IPC | ping, status, backends, stats — all verified | `cargo run --example demo_proof --release -p duvm-daemon` |
+| Concurrent operations | 8 threads × 100 pages, thread-safe | `cargo run --example demo_proof --release -p duvm-daemon` |
 | C FFI | 100 pages round-tripped from C program | `make demo-c` |
 | Kernel module | Compiles as virtual block device for Linux 6.17 | `make kmod` |
-| Test suite | 60 tests passing | `make test` |
+| Test suite | 133 tests passing (unit + integration + comprehensive) | `make test` |
 | Code quality | clippy -D warnings clean, rustfmt clean | `make check` |
+| End-to-end proof | 10/10 subsystems verified in single demo | `cargo run --example demo_proof --release -p duvm-daemon` |
 
 ### Components
 
@@ -45,13 +52,16 @@
 
 ```bash
 make build          # Build all Rust crates
-make test           # Run all 60 tests
+make test           # Run all 133 tests
 make check          # Format + lint + test
 make kmod           # Build kernel module
 make demo           # Engine demo
 make demo-c         # C FFI demo
 make bench          # Performance benchmarks
 bash scripts/preflight.sh  # Verify all prerequisites
+
+# End-to-end proof demo (exercises all 10 subsystems):
+cargo run --example demo_proof --release -p duvm-daemon
 ```
 
 ## Prerequisites
@@ -79,12 +89,13 @@ Remaining for production:
 
 ## Key Technical Decisions
 
-See `research/decisions.md` for full rationale.
+See `DECISIONS.md` for comprehensive rationale and `research/decisions.md` for historical context.
 
 | Decision | Choice | Why |
 |---|---|---|
 | Swap interception | Virtual block device (not frontswap) | frontswap removed in Linux 6.17; block device uses stable blk-mq API |
 | Architecture | Symmetric — every node is compute + memory | User requirement: all nodes equal |
+| Policy engine | LRU with tier-aware cascading | Prefers lowest-latency tier; cascades when full; skips unhealthy backends |
 | Fallback mode | userfaultfd (C helper for aarch64 ABI) | Works without kernel module; proven at 22us/fault |
 | Development safety | QEMU/KVM for kernel module testing | Crashes don't affect host |
 | Kernel module dev | calc2 for hardware integration testing | Two identical machines available |

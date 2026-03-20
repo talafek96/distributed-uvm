@@ -268,6 +268,7 @@ name = "duvm-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytemuck",
  "cc",
  "clap",
  "duvm-backend-compress",
@@ -276,6 +277,7 @@ dependencies = [
  "duvm-backend-trait",
  "duvm-common",
  "libc",
+ "libduvm",
  "nix",
  "parking_lot",
  "serde",
@@ -306,7 +308,11 @@ dependencies = [
  "duvm-backend-tcp",
  "duvm-backend-trait",
  "duvm-common",
+ "duvm-daemon",
  "libduvm",
+ "serde_json",
+ "tokio",
+ "toml 0.8.23",
 ]
 
 [[package]]
