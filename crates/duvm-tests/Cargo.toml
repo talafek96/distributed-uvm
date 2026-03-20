@@ -1,0 +1,19 @@
+[package]
+name = "duvm-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Integration tests for duvm"
+publish = false
+
+[[test]]
+name = "integration"
+path = "tests/integration_test.rs"
+
+[dependencies]
+duvm-common = { workspace = true }
+duvm-backend-trait = { workspace = true }
+duvm-backend-memory = { workspace = true }
+duvm-backend-compress = { workspace = true }
+libduvm = { workspace = true }
+bytemuck = { workspace = true }

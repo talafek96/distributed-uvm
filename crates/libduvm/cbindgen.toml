@@ -1,0 +1,8 @@
+language = "C"
+header = "/* duvm.h - C API for duvm distributed memory library */"
+include_guard = "DUVM_H"
+tab_width = 4
+style = "both"
+
+[export]
+include = ["duvm_init", "duvm_store_page", "duvm_load_page", "duvm_free_page", "duvm_capacity_total", "duvm_capacity_used"]

@@ -1,0 +1,15 @@
+[package]
+name = "duvm-backend-compress"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "LZ4 compression backend for duvm"
+
+[dependencies]
+duvm-common = { workspace = true }
+duvm-backend-trait = { workspace = true }
+anyhow = { workspace = true }
+toml = { workspace = true }
+parking_lot = { workspace = true }
+tracing = { workspace = true }
+lz4_flex = { workspace = true }

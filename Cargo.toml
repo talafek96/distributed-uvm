@@ -1,0 +1,52 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/duvm-common",
+    "crates/duvm-backend-trait",
+    "crates/duvm-backend-memory",
+    "crates/duvm-backend-compress",
+    "crates/duvm-daemon",
+    "crates/duvm-ctl",
+    "crates/libduvm",
+    "crates/duvm-tests",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/distributed-uvm/distributed-uvm"
+
+[workspace.dependencies]
+duvm-common = { path = "crates/duvm-common" }
+duvm-backend-trait = { path = "crates/duvm-backend-trait" }
+duvm-backend-memory = { path = "crates/duvm-backend-memory" }
+duvm-backend-compress = { path = "crates/duvm-backend-compress" }
+libduvm = { path = "crates/libduvm" }
+
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+libc = "0.2"
+nix = { version = "0.29", features = ["mman", "signal", "fs", "ioctl"] }
+lz4_flex = "0.11"
+crossbeam-utils = "0.8"
+parking_lot = "0.12"
+prometheus-client = "0.23"
+bytemuck = { version = "1", features = ["derive"] }
+
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = "symbols"
+
+[profile.dev]
+# Keep debug info for development
+debug = true

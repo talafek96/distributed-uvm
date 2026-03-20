@@ -1,0 +1,19 @@
+[package]
+name = "duvm-ctl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CLI management tool for duvm"
+
+[[bin]]
+name = "duvm-ctl"
+path = "src/main.rs"
+
+[dependencies]
+duvm-common = { workspace = true }
+duvm-backend-trait = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
