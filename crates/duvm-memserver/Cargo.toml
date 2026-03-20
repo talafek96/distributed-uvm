@@ -1,0 +1,15 @@
+[package]
+name = "duvm-memserver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Remote memory server for duvm - serves pages over TCP"
+
+[[bin]]
+name = "duvm-memserver"
+path = "src/main.rs"
+
+[dependencies]
+duvm-common = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }

@@ -208,6 +208,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "duvm-backend-tcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "duvm-backend-trait",
+ "duvm-common",
+ "parking_lot",
+ "toml 0.8.23",
+ "tracing",
+]
+
+[[package]]
 name = "duvm-backend-trait"
 version = "0.1.0"
 dependencies = [
@@ -249,6 +261,7 @@ dependencies = [
  "clap",
  "duvm-backend-compress",
  "duvm-backend-memory",
+ "duvm-backend-tcp",
  "duvm-backend-trait",
  "duvm-common",
  "libc",
@@ -261,6 +274,15 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "duvm-memserver"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "duvm-common",
 ]
 
 [[package]]
