@@ -116,7 +116,14 @@ impl DaemonConfig {
         if Path::new(path).exists() {
             match std::fs::read_to_string(path) {
                 Ok(content) => match toml::from_str(&content) {
-                    Ok(config) => return config,
+                    Ok(config) => {
+                        let config: DaemonConfig = config;
+                        if let Err(e) = config.validate() {
+                            tracing::warn!("Config validation failed: {}, using defaults", e);
+                            return Self::default();
+                        }
+                        return config;
+                    }
                     Err(e) => {
                         tracing::warn!("Failed to parse config {}: {}, using defaults", path, e);
                     }
@@ -129,5 +136,35 @@ impl DaemonConfig {
             tracing::info!("Config file {} not found, using defaults", path);
         }
         Self::default()
+    }
+
+    /// Apply CLI argument overrides to the loaded config.
+    pub fn apply_cli_overrides(&mut self, socket_path: Option<&str>, log_level: Option<&str>) {
+        if let Some(path) = socket_path {
+            self.daemon.socket_path = path.to_string();
+        }
+        if let Some(level) = log_level {
+            self.daemon.log_level = level.to_string();
+        }
+    }
+
+    /// Validate configuration values.
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(ref mem) = self.backends.memory
+            && mem.enabled && mem.max_pages == 0
+        {
+            return Err("backends.memory.max_pages must be > 0".to_string());
+        }
+        if let Some(ref comp) = self.backends.compress
+            && comp.enabled && comp.max_pages == 0
+        {
+            return Err("backends.compress.max_pages must be > 0".to_string());
+        }
+        // Validate strategy is a known value
+        match self.policy.strategy.as_str() {
+            "lru" => {}
+            other => return Err(format!("unknown policy strategy: '{}' (expected 'lru')", other)),
+        }
+        Ok(())
     }
 }

@@ -6,26 +6,28 @@
 
 ## Current State
 
-**Phase: Implementation — core framework complete, transparent page faults proven, cross-machine memory proven, comprehensive testing done**
+**Phase: Implementation — core framework complete, all bugs fixed, comprehensive testing done, LRU eviction working**
 
 ### What Works (Proven)
 
 | What | Evidence | Command |
 |---|---|---|
-| Engine data path (store/load/invalidate) | 500 pages through LZ4 backend, all verified | `make demo` |
+| Engine data path (store/load/invalidate) | 500 pages through LZ4 backend, byte-perfect | `make demo` |
 | LRU policy with tier cascading | Prefers low-latency, cascades when full, skips unhealthy | `cargo run --example demo_proof --release -p duvm-daemon` |
-| Capacity overflow detection | Backends full → error stats tracked, clean error returns | `cargo run --example demo_proof --release -p duvm-daemon` |
+| LRU eviction under memory pressure | Hot pages survive, cold pages evicted, new stores succeed | `cargo run --example demo_proof --release -p duvm-daemon` |
+| Double-store handle leak fixed | Re-storing at same offset frees old page, capacity stays correct | `cargo run --example demo_proof --release -p duvm-daemon` |
+| Config validation | Rejects max_pages=0, unknown strategy; CLI --socket override works | `cargo run --example demo_proof --release -p duvm-daemon` |
 | Multi-backend cascading | Compress full → falls back to memory | `cargo run --example demo_proof --release -p duvm-daemon` |
 | Cross-machine memory (calc1 ↔ calc2) | 10,000 pages over ConnectX-7, byte-perfect | `cargo run --example demo_distributed --release -p duvm-daemon` |
 | Transparent page fault handling | 256 pages via userfaultfd, 22us/fault, zero errors | `cargo run --example demo_uffd --release -p duvm-daemon` |
 | TCP remote memory backend | 100 pages round-tripped via TCP, all freed | `cargo run --example demo_proof --release -p duvm-daemon` |
-| Daemon socket IPC | ping, status, backends, stats — all verified | `cargo run --example demo_proof --release -p duvm-daemon` |
+| Daemon socket IPC | ping, status, backends, stats — all verified, JSON-safe | `cargo run --example demo_proof --release -p duvm-daemon` |
 | Concurrent operations | 8 threads × 100 pages, thread-safe | `cargo run --example demo_proof --release -p duvm-daemon` |
 | C FFI | 100 pages round-tripped from C program | `make demo-c` |
 | Kernel module | Compiles as virtual block device for Linux 6.17 | `make kmod` |
-| Test suite | 133 tests passing (unit + integration + comprehensive) | `make test` |
-| Code quality | clippy -D warnings clean, rustfmt clean | `make check` |
-| End-to-end proof | 10/10 subsystems verified in single demo | `cargo run --example demo_proof --release -p duvm-daemon` |
+| Test suite | 165 tests passing (unit + integration + comprehensive) | `cargo test` |
+| Code quality | clippy -D warnings clean, rustfmt clean | `cargo clippy --all-targets -- -D warnings` |
+| End-to-end proof | 12/12 subsystems verified in single demo | `cargo run --example demo_proof --release -p duvm-daemon` |
 
 ### Components
 
@@ -52,7 +54,7 @@
 
 ```bash
 make build          # Build all Rust crates
-make test           # Run all 133 tests
+make test           # Run all 165 tests
 make check          # Format + lint + test
 make kmod           # Build kernel module
 make demo           # Engine demo

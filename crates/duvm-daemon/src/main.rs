@@ -40,7 +40,16 @@ async fn main() -> Result<()> {
 
     tracing::info!("duvm-daemon starting");
 
-    let config = config::DaemonConfig::load_or_default(&args.config);
+    let mut config = config::DaemonConfig::load_or_default(&args.config);
+
+    // Apply CLI overrides (CLI args take precedence over config file)
+    let socket_override = if args.socket != "/run/duvm/duvm.sock" {
+        Some(args.socket.as_str())
+    } else {
+        None
+    };
+    config.apply_cli_overrides(socket_override, None);
+
     tracing::info!(?config, "Configuration loaded");
 
     let mut eng = engine::Engine::new(config)?;

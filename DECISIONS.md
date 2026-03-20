@@ -209,7 +209,7 @@ uint64_t duvm_capacity_used(void);
 
 ---
 
-## Identified Gaps (addressed in this session)
+## Identified Gaps (addressed in previous session)
 
 | Gap | Description | Resolution |
 |-----|-------------|------------|
@@ -221,3 +221,24 @@ uint64_t duvm_capacity_used(void);
 | No error-path tests | All tests were happy-path only | Added comprehensive error, concurrency, capacity, and negative-path tests |
 | No config tests | Config parsing never tested | Added config loading, defaults, and validation tests |
 | No daemon integration test | Engine.run() never tested | Added end-to-end daemon socket communication test |
+
+---
+
+## Gaps Found and Fixed (second audit)
+
+| Bug/Gap | Impact | Fix |
+|---------|--------|-----|
+| **Engine double-store leaks handles** | Storing at the same offset twice left the old backend page allocated but unreachable — a handle leak that would slowly exhaust backend capacity | `store_page()` now removes and frees the old page before allocating a new one |
+| **No LRU eviction** | When all backends were full, store simply failed with an error. No automatic memory management. | `store_page()` now calls `try_evict_one()` which finds the LRU unpinned page across all backends and frees it before retrying |
+| **Pool `page_index` dead code** | `Pool` struct had `page_index: RwLock<HashMap<u64, PageHandle>>` and `next_offset: AtomicU64` that were populated on every store but never read — wasted memory and CPU | Removed dead fields entirely |
+| **`handle_client` JSON injection** | Unknown daemon commands were formatted with `format!()` producing invalid JSON if the command contained quotes or special characters | Replaced with `serde_json::json!()` for proper JSON escaping |
+| **Stale `backends_info`** | `Engine::run()` built backend info once at startup and served it to every client — health status and capacity were never refreshed | Backend info is now rebuilt from live backends for each client connection |
+| **CLI `--socket` arg ignored** | `main.rs` parsed `--socket` but never used the value — config file socket path was always used | Added `apply_cli_overrides()` to config, wired in main.rs |
+| **Config `strategy` field unused** | Config loaded `strategy: String` from TOML but engine always hardcoded `Strategy::Lru` | Added `validate()` that rejects unknown strategy strings; engine still uses LRU as the only implemented strategy, but now unknown values are caught at config load |
+| **No config validation** | `max_pages: 0` and invalid strategy strings were silently accepted | Added `DaemonConfig::validate()` checking max_pages > 0 for enabled backends and known strategy values |
+| **Pool `free()` silent on missing backend** | Freeing a handle with a non-existent backend_id returned `Ok(())` silently — a memory leak | Now returns an error |
+| **Pool `capacity()` overflow risk** | Summed backend capacities with `+=` which could overflow | Changed to `saturating_add` |
+| **PageFlags bitwise ops untested** | `BitOrAssign`, `BitAndAssign`, `BitAnd`, `Not` implementations had zero test coverage | Added 5 tests verifying each operator independently |
+| **Ring buffer wrap-around batch untested** | `pop_batch()` was never tested when the ring's internal indices wrapped around the capacity boundary | Added test with explicit wrap-around scenario |
+| **Protocol field layout untested** | `RingRequest` and `RingCompletion` bytemuck `Pod` impls were trusted but never verified for correct byte positions | Added tests writing known values and checking exact byte offsets |
+| **Stats Display untested** | `StatsSnapshot` Display impl was never verified | Added test checking all 8 field labels appear in output |

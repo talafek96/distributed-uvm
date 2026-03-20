@@ -93,12 +93,38 @@ impl Engine {
     }
 
     /// Store a page to the appropriate backend.
+    ///
+    /// If the offset already has a page stored, the old page is freed first
+    /// to prevent handle leaks.
+    ///
+    /// If all backends are full, attempts LRU eviction before failing.
     pub fn store_page(&self, offset: u64, data: &PageBuffer) -> Result<PageHandle> {
+        // Free the old page if this offset was already stored (prevent handle leak)
+        if let Some(old_meta) = self.policy.remove(offset)
+            && let Some(old_backend) = self.backends.get(&old_meta.backend_id)
+        {
+            let _ = old_backend.free_page(old_meta.handle);
+        }
+
         let capacities = self.backend_capacities();
-        let tier = self.policy.select_tier(&capacities).ok_or_else(|| {
-            self.stats.store_errors.fetch_add(1, Ordering::Relaxed);
-            anyhow::anyhow!("all backends are full — no tier available for storage")
-        })?;
+        let tier = match self.policy.select_tier(&capacities) {
+            Some(t) => t,
+            None => {
+                // All backends full — try LRU eviction
+                if let Some(evicted) = self.try_evict_one() {
+                    tracing::debug!(evicted_offset = evicted, "evicted LRU page to make room");
+                    // Re-check after eviction
+                    let caps = self.backend_capacities();
+                    self.policy.select_tier(&caps).ok_or_else(|| {
+                        self.stats.store_errors.fetch_add(1, Ordering::Relaxed);
+                        anyhow::anyhow!("all backends full even after eviction")
+                    })?
+                } else {
+                    self.stats.store_errors.fetch_add(1, Ordering::Relaxed);
+                    anyhow::bail!("all backends are full — no tier available and no evictable pages");
+                }
+            }
+        };
 
         let backend_id = self.tier_to_backend_id(tier);
         let backend = self
@@ -129,6 +155,21 @@ impl Engine {
 
         tracing::debug!(offset, %handle, %tier, "page stored");
         Ok(handle)
+    }
+
+    /// Attempt to evict one LRU page from any backend. Returns the evicted offset.
+    fn try_evict_one(&self) -> Option<u64> {
+        // Try each backend for an eviction candidate
+        for (&backend_id, backend) in &self.backends {
+            if let Some(offset) = self.policy.find_eviction_candidate(backend_id)
+                && let Some(meta) = self.policy.remove(offset)
+                && backend.free_page(meta.handle).is_ok()
+            {
+                self.stats.pages_invalidated.fetch_add(1, Ordering::Relaxed);
+                return Some(offset);
+            }
+        }
+        None
     }
 
     /// Load a page from whichever backend has it.
@@ -237,7 +278,8 @@ impl Engine {
         let policy = self.policy.clone();
 
         // Build a shared reference to backends info for the handler
-        let backends_info: Vec<BackendInfo> = self.backend_info();
+        // NOTE: This is rebuilt per-request cycle via backend_info_fn closure below
+        let backends = &self.backends;
 
         loop {
             tokio::select! {
@@ -246,7 +288,10 @@ impl Engine {
                         Ok((stream, _)) => {
                             let stats = stats.clone();
                             let policy = policy.clone();
-                            let backends_info = backends_info.clone();
+                            let backends_info: Vec<BackendInfo> = backends
+                                .values()
+                                .map(|b| BackendInfo::from_backend(b.as_ref()))
+                                .collect();
                             tokio::spawn(async move {
                                 if let Err(e) = handle_client(stream, &stats, &policy, &backends_info).await {
                                     tracing::warn!("Client error: {}", e);
@@ -299,7 +344,7 @@ async fn handle_client(
             "backends" => serde_json::to_string(backends_info)?,
             "stats" => serde_json::to_string(&stats.snapshot())?,
             "ping" => "pong".to_string(),
-            _ => format!("{{\"error\": \"unknown command: {}\"}}", cmd),
+            _ => serde_json::to_string(&serde_json::json!({"error": format!("unknown command: {}", cmd)}))?,
         };
         writer.write_all(response.as_bytes()).await?;
         writer.write_all(b"\n").await?;
@@ -384,8 +429,8 @@ mod tests {
     }
 
     #[test]
-    fn engine_capacity_overflow_detected() {
-        // Create config with tiny backend (2 pages max)
+    fn engine_capacity_overflow_triggers_eviction() {
+        // Create config with tiny backend (2 pages max each)
         let mut config = DaemonConfig::default();
         config.backends.memory = Some(crate::config::MemoryBackendConfig {
             enabled: true,
@@ -405,12 +450,18 @@ mod tests {
         engine.store_page(2, &data).unwrap();
         engine.store_page(3, &data).unwrap();
 
-        // 5th store should fail — all backends full
+        // 5th store should succeed via LRU eviction (evicts page 0)
         let result = engine.store_page(4, &data);
-        assert!(result.is_err());
+        assert!(result.is_ok(), "store should succeed via eviction");
 
-        let snap = engine.stats_snapshot();
-        assert!(snap.store_errors >= 1, "store_errors should be incremented");
+        // Evicted page should no longer be loadable
+        let mut buf = [0u8; PAGE_SIZE];
+        let evicted_any = engine.load_page(0, &mut buf).is_err();
+        // At least one of the original pages should have been evicted
+        assert!(evicted_any, "at least one old page should be evicted");
+
+        // The newly stored page should be loadable
+        engine.load_page(4, &mut buf).unwrap();
     }
 
     #[test]

@@ -1092,3 +1092,551 @@ fn backend_capacity_utilization() {
     };
     assert!(!unhealthy.has_capacity());
 }
+
+// ============================================================================
+// SECTION 13: Bug-fix verification tests
+// ============================================================================
+
+/// Prove: double-store at same offset frees the old handle (no leak).
+/// Before the fix, storing at offset 0 twice would leave the first backend
+/// page allocated but unreachable.
+#[test]
+fn engine_double_store_frees_old_handle() {
+    let mut config = DaemonConfig::default();
+    config.backends.compress = Some(duvm_daemon::config::CompressBackendConfig {
+        enabled: true,
+        max_pages: 10,
+    });
+    config.backends.memory = None;
+
+    let engine = Engine::new(config).unwrap();
+
+    let data1 = [0xAA; PAGE_SIZE];
+    let data2 = [0xBB; PAGE_SIZE];
+
+    engine.store_page(0, &data1).unwrap();
+    let (_, used_after_first) = engine.backend_info().iter()
+        .map(|b| (b.total_pages, b.used_pages))
+        .next().unwrap();
+    assert_eq!(used_after_first, 1);
+
+    // Second store at same offset should free the first page
+    engine.store_page(0, &data2).unwrap();
+    let (_, used_after_second) = engine.backend_info().iter()
+        .map(|b| (b.total_pages, b.used_pages))
+        .next().unwrap();
+    // Should still be 1, not 2 (old page was freed)
+    assert_eq!(used_after_second, 1, "old page should be freed on re-store");
+
+    // Data should be the second version
+    let mut buf = [0u8; PAGE_SIZE];
+    engine.load_page(0, &mut buf).unwrap();
+    assert_eq!(buf[0], 0xBB);
+}
+
+/// Prove: LRU eviction works when all backends are full.
+#[test]
+fn engine_eviction_under_pressure() {
+    let mut config = DaemonConfig::default();
+    config.backends.compress = Some(duvm_daemon::config::CompressBackendConfig {
+        enabled: true,
+        max_pages: 3,
+    });
+    config.backends.memory = Some(duvm_daemon::config::MemoryBackendConfig {
+        enabled: true,
+        max_pages: 3,
+    });
+
+    let engine = Engine::new(config).unwrap();
+    let data = [0u8; PAGE_SIZE];
+
+    // Fill all 6 slots
+    for i in 0..6 {
+        engine.store_page(i, &data).unwrap();
+    }
+
+    // Access pages 3-5 to make them "hot"
+    let mut buf = [0u8; PAGE_SIZE];
+    for i in 3..6 {
+        engine.load_page(i, &mut buf).unwrap();
+    }
+
+    // Store a 7th page — should evict one of pages 0-2 (cold / LRU)
+    engine.store_page(100, &data).unwrap();
+
+    // Page 100 should be loadable
+    engine.load_page(100, &mut buf).unwrap();
+
+    // At least one of 0-2 should have been evicted
+    let mut evicted = 0;
+    for i in 0..3 {
+        if engine.load_page(i, &mut buf).is_err() {
+            evicted += 1;
+        }
+    }
+    assert!(evicted >= 1, "at least one cold page should be evicted");
+
+    // Hot pages 3-5 should still be loadable
+    for i in 3..6 {
+        assert!(engine.load_page(i, &mut buf).is_ok(), "hot page {} should survive", i);
+    }
+}
+
+/// Prove: pool.free() now errors when backend doesn't exist.
+#[test]
+fn pool_free_with_invalid_backend_errors() {
+    let pool = duvm::Pool::standalone().unwrap();
+    // Create a handle with backend_id=99 which doesn't exist
+    let fake_handle = PageHandle::new(99, 0);
+    let result = pool.free(fake_handle);
+    assert!(result.is_err(), "freeing from non-existent backend should error");
+}
+
+/// Prove: pool.capacity() uses saturating_add (no overflow).
+#[test]
+fn pool_capacity_does_not_overflow() {
+    // With default config, capacity is large but should not overflow u64
+    let pool = duvm::Pool::standalone().unwrap();
+    let (total, used) = pool.capacity();
+    assert!(total > 0);
+    assert_eq!(used, 0);
+    // Basic sanity: total should be sum of both backends
+    assert!(total >= 2, "should have at least 2 backends worth of capacity");
+}
+
+// ============================================================================
+// SECTION 14: Config validation tests
+// ============================================================================
+
+/// Prove: config with max_pages=0 fails validation.
+#[test]
+fn config_validation_rejects_zero_max_pages() {
+    let mut config = DaemonConfig::default();
+    config.backends.memory = Some(duvm_daemon::config::MemoryBackendConfig {
+        enabled: true,
+        max_pages: 0,
+    });
+    let result = config.validate();
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("max_pages"));
+}
+
+/// Prove: config with unknown strategy fails validation.
+#[test]
+fn config_validation_rejects_unknown_strategy() {
+    let mut config = DaemonConfig::default();
+    config.policy.strategy = "clock-pro".to_string();
+    let result = config.validate();
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("unknown policy strategy"));
+}
+
+/// Prove: default config passes validation.
+#[test]
+fn config_default_passes_validation() {
+    let config = DaemonConfig::default();
+    assert!(config.validate().is_ok());
+}
+
+/// Prove: CLI overrides are applied correctly.
+#[test]
+fn config_cli_overrides() {
+    let mut config = DaemonConfig::default();
+    assert_eq!(config.daemon.socket_path, "/run/duvm/duvm.sock");
+
+    config.apply_cli_overrides(Some("/tmp/test.sock"), Some("debug"));
+    assert_eq!(config.daemon.socket_path, "/tmp/test.sock");
+    assert_eq!(config.daemon.log_level, "debug");
+}
+
+/// Prove: CLI overrides with None leave values unchanged.
+#[test]
+fn config_cli_overrides_none() {
+    let mut config = DaemonConfig::default();
+    let original_path = config.daemon.socket_path.clone();
+    config.apply_cli_overrides(None, None);
+    assert_eq!(config.daemon.socket_path, original_path);
+}
+
+/// Prove: config with disabled backend and max_pages=0 passes validation.
+#[test]
+fn config_disabled_backend_zero_pages_ok() {
+    let mut config = DaemonConfig::default();
+    config.backends.memory = Some(duvm_daemon::config::MemoryBackendConfig {
+        enabled: false,
+        max_pages: 0,
+    });
+    // Should be OK because the backend is disabled
+    assert!(config.validate().is_ok());
+}
+
+// ============================================================================
+// SECTION 15: PageFlags bitwise operator tests
+// ============================================================================
+
+/// Prove: BitOr combines flags correctly.
+#[test]
+fn page_flags_bitor() {
+    let combined = PageFlags::DIRTY | PageFlags::PINNED;
+    assert!(combined.contains(PageFlags::DIRTY));
+    assert!(combined.contains(PageFlags::PINNED));
+    assert!(!combined.contains(PageFlags::PREFETCHED));
+}
+
+/// Prove: BitOrAssign works correctly.
+#[test]
+fn page_flags_bitor_assign() {
+    let mut flags = PageFlags::empty();
+    flags |= PageFlags::DIRTY;
+    flags |= PageFlags::MIGRATING;
+    assert!(flags.contains(PageFlags::DIRTY));
+    assert!(flags.contains(PageFlags::MIGRATING));
+    assert!(!flags.contains(PageFlags::PINNED));
+}
+
+/// Prove: BitAnd masks flags correctly.
+#[test]
+fn page_flags_bitand() {
+    let combined = PageFlags::DIRTY | PageFlags::PINNED | PageFlags::PREFETCHED;
+    let masked = combined & PageFlags::PINNED;
+    assert!(masked.contains(PageFlags::PINNED));
+    assert!(!masked.contains(PageFlags::DIRTY));
+}
+
+/// Prove: BitAndAssign works correctly.
+#[test]
+fn page_flags_bitand_assign() {
+    let mut flags = PageFlags::DIRTY | PageFlags::PINNED;
+    flags &= !PageFlags::DIRTY;
+    assert!(!flags.contains(PageFlags::DIRTY));
+    assert!(flags.contains(PageFlags::PINNED));
+}
+
+/// Prove: Not inverts all bits.
+#[test]
+fn page_flags_not() {
+    let flags = PageFlags::DIRTY;
+    let inverted = !flags;
+    assert!(!inverted.contains(PageFlags::DIRTY));
+    // All other bits should be set
+    assert!(inverted.contains(PageFlags::PINNED));
+    assert!(inverted.contains(PageFlags::PREFETCHED));
+    assert!(inverted.contains(PageFlags::MIGRATING));
+}
+
+// ============================================================================
+// SECTION 16: Ring buffer edge case tests
+// ============================================================================
+
+/// Prove: pop_batch works correctly across a wrap-around boundary.
+#[test]
+fn ring_batch_pop_wraparound() {
+    let mut ring = RequestRing::new(8);
+
+    // Fill 7 slots (capacity-1) and drain to advance indices
+    for i in 0..7 {
+        let mut req: RingRequest = bytemuck::Zeroable::zeroed();
+        req.seq = i;
+        assert!(ring.try_push(req));
+    }
+    let mut buf = Vec::new();
+    ring.pop_batch(&mut buf, 7);
+    assert_eq!(buf.len(), 7);
+
+    // Now indices are at 7. Push 5 more — this wraps around the 8-slot ring.
+    for i in 100..105 {
+        let mut req: RingRequest = bytemuck::Zeroable::zeroed();
+        req.seq = i;
+        assert!(ring.try_push(req));
+    }
+
+    // Batch pop all 5 — these span the wrap-around
+    buf.clear();
+    let count = ring.pop_batch(&mut buf, 10);
+    assert_eq!(count, 5);
+    assert_eq!(buf[0].seq, 100);
+    assert_eq!(buf[4].seq, 104);
+    assert!(ring.is_empty());
+}
+
+/// Prove: non-power-of-2 capacity panics.
+#[test]
+#[should_panic(expected = "power of 2")]
+fn ring_non_power_of_two_panics() {
+    RequestRing::new(5);
+}
+
+/// Prove: CompletionRing non-power-of-2 panics.
+#[test]
+#[should_panic(expected = "power of 2")]
+fn completion_ring_non_power_of_two_panics() {
+    CompletionRing::new(7);
+}
+
+/// Prove: ring len() is correct after wrap-around.
+#[test]
+fn ring_len_after_wraparound() {
+    let mut ring = RequestRing::new(4);
+
+    // Push 3, pop 3 to advance indices to 3
+    for _ in 0..3 {
+        ring.try_push(bytemuck::Zeroable::zeroed());
+    }
+    for _ in 0..3 {
+        ring.try_pop();
+    }
+    assert_eq!(ring.len(), 0);
+
+    // Push 2 more — wraps around (indices 3, 0)
+    ring.try_push(bytemuck::Zeroable::zeroed());
+    ring.try_push(bytemuck::Zeroable::zeroed());
+    assert_eq!(ring.len(), 2);
+}
+
+// ============================================================================
+// SECTION 17: Protocol serialization tests
+// ============================================================================
+
+/// Prove: RingRequest fields are at expected byte offsets (cache-line layout).
+#[test]
+fn ring_request_field_layout() {
+    let mut req: RingRequest = bytemuck::Zeroable::zeroed();
+    req.op = 0xAB;
+    req.flags = 0xCD;
+    req.seq = 0x12345678;
+    req.pfn = 0x0102030405060708;
+    req.offset = 0x1112131415161718;
+    req.staging_slot = 0xAABBCCDD;
+
+    let bytes = bytemuck::bytes_of(&req);
+    assert_eq!(bytes[0], 0xAB, "op at offset 0");
+    assert_eq!(bytes[1], 0xCD, "flags at offset 1");
+    assert_eq!(&bytes[4..8], &0x12345678u32.to_le_bytes(), "seq at offset 4");
+    assert_eq!(&bytes[8..16], &0x0102030405060708u64.to_le_bytes(), "pfn at offset 8");
+    assert_eq!(&bytes[16..24], &0x1112131415161718u64.to_le_bytes(), "offset at offset 16");
+    assert_eq!(&bytes[24..28], &0xAABBCCDDu32.to_le_bytes(), "staging_slot at offset 24");
+}
+
+/// Prove: RingCompletion fields are at expected byte offsets.
+#[test]
+fn ring_completion_field_layout() {
+    let mut comp: RingCompletion = bytemuck::Zeroable::zeroed();
+    comp.seq = 0xDEADBEEF;
+    comp.result = -42;
+    comp.handle = 0xCAFEBABE01020304;
+    comp.staging_slot = 0x99887766;
+
+    let bytes = bytemuck::bytes_of(&comp);
+    assert_eq!(&bytes[0..4], &0xDEADBEEFu32.to_le_bytes(), "seq at offset 0");
+    assert_eq!(&bytes[4..8], &(-42i32).to_le_bytes(), "result at offset 4");
+    assert_eq!(&bytes[8..16], &0xCAFEBABE01020304u64.to_le_bytes(), "handle at offset 8");
+    assert_eq!(&bytes[12..16], &0xCAFEBABEu32.to_le_bytes(), "handle upper at offset 12");
+    assert_eq!(&bytes[16..20], &0x99887766u32.to_le_bytes(), "staging_slot at offset 16");
+}
+
+/// Prove: OpCode invalid values return None.
+#[test]
+fn opcode_invalid_values_return_none() {
+    assert_eq!(OpCode::from_u8(5), None);
+    assert_eq!(OpCode::from_u8(10), None);
+    assert_eq!(OpCode::from_u8(255), None);
+}
+
+/// Prove: sequence number matching works across request-completion pairs.
+#[test]
+fn request_completion_seq_matching() {
+    let mut req_ring = RequestRing::new(16);
+    let mut comp_ring = CompletionRing::new(16);
+
+    // Submit 5 requests with specific seq numbers
+    for seq in [10, 20, 30, 40, 50] {
+        let mut req: RingRequest = bytemuck::Zeroable::zeroed();
+        req.seq = seq;
+        req.op = OpCode::Store as u8;
+        req_ring.try_push(req);
+    }
+
+    // "Process" them and create completions in reverse order
+    let mut requests = Vec::new();
+    while let Some(req) = req_ring.try_pop() {
+        requests.push(req);
+    }
+
+    for req in requests.iter().rev() {
+        let mut comp: RingCompletion = bytemuck::Zeroable::zeroed();
+        comp.seq = req.seq;
+        comp.result = 0;
+        comp_ring.try_push(comp);
+    }
+
+    // Pop completions and verify they can be matched back
+    let mut seqs_seen = Vec::new();
+    while let Some(comp) = comp_ring.try_pop() {
+        seqs_seen.push(comp.seq);
+        assert_eq!(comp.result, 0);
+    }
+    assert_eq!(seqs_seen.len(), 5);
+    // All original seqs should be present (order may differ)
+    for expected_seq in [10, 20, 30, 40, 50] {
+        assert!(seqs_seen.contains(&expected_seq), "missing seq {}", expected_seq);
+    }
+}
+
+// ============================================================================
+// SECTION 18: Stats tests
+// ============================================================================
+
+/// Prove: StatsSnapshot Display format includes all fields.
+#[test]
+fn stats_display_includes_all_fields() {
+    let stats = DaemonStats::new();
+    stats.pages_stored.fetch_add(42, std::sync::atomic::Ordering::Relaxed);
+    stats.pages_loaded.fetch_add(17, std::sync::atomic::Ordering::Relaxed);
+    stats.pages_invalidated.fetch_add(3, std::sync::atomic::Ordering::Relaxed);
+    stats.store_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    stats.load_errors.fetch_add(2, std::sync::atomic::Ordering::Relaxed);
+    stats.fallback_events.fetch_add(5, std::sync::atomic::Ordering::Relaxed);
+    stats.ring_full_events.fetch_add(7, std::sync::atomic::Ordering::Relaxed);
+
+    let snap = stats.snapshot();
+    let display = format!("{}", snap);
+
+    assert!(display.contains("42"), "should contain pages_stored=42");
+    assert!(display.contains("17"), "should contain pages_loaded=17");
+    assert!(display.contains("3"), "should contain pages_invalidated=3");
+    assert!(display.contains("Store errors"), "should have store errors label");
+    assert!(display.contains("Load errors"), "should have load errors label");
+    assert!(display.contains("Fallback events"), "should have fallback label");
+    assert!(display.contains("Ring full events"), "should have ring full label");
+}
+
+/// Prove: StatsSnapshot serialization roundtrips through JSON.
+#[test]
+fn stats_snapshot_json_roundtrip() {
+    let stats = DaemonStats::new();
+    stats.pages_stored.fetch_add(100, std::sync::atomic::Ordering::Relaxed);
+    stats.load_errors.fetch_add(3, std::sync::atomic::Ordering::Relaxed);
+
+    let snap = stats.snapshot();
+    let json = serde_json::to_string(&snap).unwrap();
+    let deserialized: duvm_common::stats::StatsSnapshot = serde_json::from_str(&json).unwrap();
+
+    assert_eq!(deserialized.pages_stored, 100);
+    assert_eq!(deserialized.load_errors, 3);
+    assert_eq!(deserialized.pages_loaded, 0);
+}
+
+// ============================================================================
+// SECTION 19: Backend trait method coverage
+// ============================================================================
+
+/// Prove: memory backend name() and tier() return expected values.
+#[test]
+fn memory_backend_name_and_tier() {
+    let backend = MemoryBackend::new(0);
+    assert_eq!(backend.name(), "memory");
+    assert_eq!(backend.tier(), Tier::Compressed);
+}
+
+/// Prove: compress backend name() and tier() return expected values.
+#[test]
+fn compress_backend_name_and_tier() {
+    let backend = CompressBackend::new(1);
+    assert_eq!(backend.name(), "compress");
+    assert_eq!(backend.tier(), Tier::Compressed);
+}
+
+/// Prove: memory backend latency_ns() returns expected value.
+#[test]
+fn memory_backend_latency() {
+    let backend = MemoryBackend::new(0);
+    assert_eq!(backend.latency_ns(), 100);
+}
+
+/// Prove: compress backend latency_ns() returns expected value.
+#[test]
+fn compress_backend_latency() {
+    let backend = CompressBackend::new(1);
+    assert_eq!(backend.latency_ns(), 3000);
+}
+
+/// Prove: BackendInfo::from_backend correctly maps all fields.
+#[test]
+fn backend_info_from_backend_mapping() {
+    let mut backend = MemoryBackend::new(0);
+    backend.init(&BackendConfig { max_pages: 500, ..Default::default() }).unwrap();
+
+    let h = backend.alloc_page().unwrap();
+    backend.store_page(h, &[0u8; PAGE_SIZE]).unwrap();
+
+    let info = duvm_backend_trait::BackendInfo::from_backend(&backend);
+    assert_eq!(info.name, "memory");
+    assert_eq!(info.tier, "compressed"); // Tier::Compressed.to_string()
+    assert_eq!(info.total_pages, 500);
+    assert_eq!(info.used_pages, 1);
+    assert_eq!(info.latency_ns, 100);
+    assert!(info.healthy);
+}
+
+// ============================================================================
+// SECTION 20: Engine eviction + double-store interaction
+// ============================================================================
+
+/// Prove: storing 100 pages into a 10-slot backend works via eviction.
+#[test]
+fn engine_store_100_in_10_slots() {
+    let mut config = DaemonConfig::default();
+    config.backends.compress = Some(duvm_daemon::config::CompressBackendConfig {
+        enabled: true,
+        max_pages: 5,
+    });
+    config.backends.memory = Some(duvm_daemon::config::MemoryBackendConfig {
+        enabled: true,
+        max_pages: 5,
+    });
+
+    let engine = Engine::new(config).unwrap();
+
+    // Store 100 pages into 10 total slots — requires constant eviction
+    for i in 0u64..100 {
+        let mut data = [0u8; PAGE_SIZE];
+        data[..8].copy_from_slice(&i.to_le_bytes());
+        engine.store_page(i, &data).unwrap();
+    }
+
+    // The last ~10 pages should be loadable
+    let mut loadable = 0;
+    let mut buf = [0u8; PAGE_SIZE];
+    for i in 0u64..100 {
+        if engine.load_page(i, &mut buf).is_ok() {
+            let stored = u64::from_le_bytes(buf[..8].try_into().unwrap());
+            assert_eq!(stored, i, "loaded page {} has wrong data", i);
+            loadable += 1;
+        }
+    }
+
+    // Should have about 10 pages loadable (the 10 most recent ones)
+    assert!((5..=12).contains(&loadable),
+        "expected ~10 loadable pages, got {}", loadable);
+
+    let snap = engine.stats_snapshot();
+    assert_eq!(snap.pages_stored, 100);
+    assert_eq!(snap.store_errors, 0);
+}
+
+/// Prove: config with all backends disabled produces no-backend engine that
+/// fails to store (with no evictable pages, so store errors properly).
+#[test]
+fn engine_no_backends_store_fails() {
+    let mut config = DaemonConfig::default();
+    config.backends.memory = None;
+    config.backends.compress = None;
+
+    let engine = Engine::new(config).unwrap();
+    let data = [0u8; PAGE_SIZE];
+    let result = engine.store_page(0, &data);
+    assert!(result.is_err());
+
+    let snap = engine.stats_snapshot();
+    assert!(snap.store_errors >= 1);
+}

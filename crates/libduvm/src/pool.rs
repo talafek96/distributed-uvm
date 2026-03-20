@@ -5,9 +5,7 @@ use duvm_backend_compress::CompressBackend;
 use duvm_backend_memory::MemoryBackend;
 use duvm_backend_trait::{BackendConfig, DuvmBackend};
 use duvm_common::page::{PAGE_SIZE, PageBuffer, PageHandle};
-use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A duvm memory pool that manages distributed page storage.
 ///
@@ -15,8 +13,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// In daemon mode, it communicates with duvm-daemon via Unix socket.
 pub struct Pool {
     backends: HashMap<u8, Box<dyn DuvmBackend>>,
-    page_index: RwLock<HashMap<u64, PageHandle>>,
-    next_offset: AtomicU64,
 }
 
 impl Pool {
@@ -33,11 +29,7 @@ impl Pool {
         comp.init(&BackendConfig::default())?;
         backends.insert(1, Box::new(comp));
 
-        Ok(Self {
-            backends,
-            page_index: RwLock::new(HashMap::new()),
-            next_offset: AtomicU64::new(0),
-        })
+        Ok(Self { backends })
     }
 
     /// Store a page and return its handle.
@@ -50,9 +42,6 @@ impl Pool {
 
         let handle = backend.alloc_page()?;
         backend.store_page(handle, data)?;
-
-        let offset = self.next_offset.fetch_add(1, Ordering::Relaxed);
-        self.page_index.write().insert(offset, handle);
 
         Ok(handle)
     }
@@ -73,9 +62,11 @@ impl Pool {
     /// Free a page.
     pub fn free(&self, handle: PageHandle) -> Result<()> {
         let backend_id = handle.backend_id();
-        if let Some(backend) = self.backends.get(&backend_id) {
-            backend.free_page(handle)?;
-        }
+        let backend = self
+            .backends
+            .get(&backend_id)
+            .ok_or_else(|| anyhow::anyhow!("backend {} not found for free", backend_id))?;
+        backend.free_page(handle)?;
         Ok(())
     }
 
@@ -85,8 +76,8 @@ impl Pool {
         let mut used = 0u64;
         for backend in self.backends.values() {
             let (t, u) = backend.capacity();
-            total += t;
-            used += u;
+            total = total.saturating_add(t);
+            used = used.saturating_add(u);
         }
         (total, used)
     }

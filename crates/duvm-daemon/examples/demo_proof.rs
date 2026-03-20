@@ -35,7 +35,7 @@ fn main() {
     // =========================================================================
     // Test 1: Engine data integrity (500 pages)
     // =========================================================================
-    print!("[1/10] Engine store/load data integrity (500 pages)... ");
+    print!("[1/12] Engine store/load data integrity (500 pages)... ");
     {
         let config = DaemonConfig::default();
         let engine = Engine::new(config).unwrap();
@@ -83,7 +83,7 @@ fn main() {
     // =========================================================================
     // Test 2: Policy LRU tier selection
     // =========================================================================
-    print!("[2/10] Policy engine LRU tier selection... ");
+    print!("[2/12] Policy engine LRU tier selection... ");
     {
         let policy = PolicyEngine::new(Strategy::Lru);
 
@@ -124,9 +124,9 @@ fn main() {
     }
 
     // =========================================================================
-    // Test 3: Capacity overflow and error stats
+    // Test 3: LRU eviction under memory pressure
     // =========================================================================
-    print!("[3/10] Capacity overflow detection and error stats... ");
+    print!("[3/12] LRU eviction under memory pressure... ");
     {
         let mut config = DaemonConfig::default();
         config.backends.memory = Some(duvm_daemon::config::MemoryBackendConfig { enabled: true, max_pages: 3 });
@@ -136,22 +136,28 @@ fn main() {
         let data = [0u8; PAGE_SIZE];
 
         // Fill both backends (3 + 3 = 6 pages)
-        let mut stored = 0;
         for i in 0..6 {
-            if engine.store_page(i, &data).is_ok() {
-                stored += 1;
-            }
+            engine.store_page(i, &data).unwrap();
         }
 
-        // 7th should fail
-        let overflow_detected = engine.store_page(100, &data).is_err();
-        let snap = engine.stats_snapshot();
+        // Access pages 3-5 to make them "hot"
+        let mut buf = [0u8; PAGE_SIZE];
+        for i in 3..6 {
+            engine.load_page(i, &mut buf).unwrap();
+        }
 
-        if stored == 6 && overflow_detected && snap.store_errors >= 1 {
-            println!("PASS (6 stored, overflow detected, store_errors={})", snap.store_errors);
+        // 7th store should succeed via eviction (evicts a cold page 0-2)
+        let eviction_worked = engine.store_page(100, &data).is_ok();
+        let new_page_loadable = engine.load_page(100, &mut buf).is_ok();
+
+        // Hot pages should survive
+        let hot_survived = (3..6).all(|i| engine.load_page(i, &mut buf).is_ok());
+
+        if eviction_worked && new_page_loadable && hot_survived {
+            println!("PASS (eviction succeeded, new page loadable, hot pages survived)");
             tests_passed += 1;
         } else {
-            println!("FAIL (stored={}, overflow={}, errors={})", stored, overflow_detected, snap.store_errors);
+            println!("FAIL (eviction={}, loadable={}, hot_survived={})", eviction_worked, new_page_loadable, hot_survived);
             tests_failed += 1;
         }
     }
@@ -159,7 +165,7 @@ fn main() {
     // =========================================================================
     // Test 4: Multi-backend cascading
     // =========================================================================
-    print!("[4/10] Multi-backend cascading (compress full -> memory)... ");
+    print!("[4/12] Multi-backend cascading (compress full -> memory)... ");
     {
         let mut config = DaemonConfig::default();
         config.backends.compress = Some(duvm_daemon::config::CompressBackendConfig { enabled: true, max_pages: 2 });
@@ -195,7 +201,7 @@ fn main() {
     // =========================================================================
     // Test 5: Invalidation with verification
     // =========================================================================
-    print!("[5/10] Invalidation with verification... ");
+    print!("[5/12] Invalidation with verification... ");
     {
         let config = DaemonConfig::default();
         let engine = Engine::new(config).unwrap();
@@ -242,7 +248,7 @@ fn main() {
     // =========================================================================
     // Test 6: Concurrent operations
     // =========================================================================
-    print!("[6/10] Concurrent operations (8 threads x 100 pages)... ");
+    print!("[6/12] Concurrent operations (8 threads x 100 pages)... ");
     {
         let policy = Arc::new(PolicyEngine::new(Strategy::Lru));
         let start = Instant::now();
@@ -283,7 +289,7 @@ fn main() {
     // =========================================================================
     // Test 7: Daemon socket communication
     // =========================================================================
-    print!("[7/10] Daemon socket communication... ");
+    print!("[7/12] Daemon socket communication... ");
     {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(async {
@@ -347,7 +353,7 @@ fn main() {
     // =========================================================================
     // Test 8: TCP backend with local memserver
     // =========================================================================
-    print!("[8/10] TCP backend with local memserver... ");
+    print!("[8/12] TCP backend with local memserver... ");
     {
         use duvm_backend_tcp::TcpBackend;
         use std::net::TcpListener;
@@ -458,7 +464,7 @@ fn main() {
     // =========================================================================
     // Test 9: libduvm Pool full lifecycle
     // =========================================================================
-    print!("[9/10] libduvm Pool full lifecycle (1000 pages)... ");
+    print!("[9/12] libduvm Pool full lifecycle (1000 pages)... ");
     {
         let pool = duvm::Pool::standalone().unwrap();
         let start = Instant::now();
@@ -500,7 +506,7 @@ fn main() {
     // =========================================================================
     // Test 10: Ring buffer throughput proof
     // =========================================================================
-    print!("[10/10] Ring buffer throughput... ");
+    print!("[10/12] Ring buffer throughput... ");
     {
         let mut ring = RequestRing::new(4096);
         let ops = 100_000u64;
@@ -527,6 +533,76 @@ fn main() {
     }
 
     // =========================================================================
+    // Test 11: Double-store handle leak fix
+    // =========================================================================
+    print!("[11/12] Double-store frees old handle (no leak)... ");
+    {
+        let mut config = DaemonConfig::default();
+        config.backends.compress = Some(duvm_daemon::config::CompressBackendConfig { enabled: true, max_pages: 10 });
+        config.backends.memory = None;
+
+        let engine = Engine::new(config).unwrap();
+
+        let data1 = [0xAA; PAGE_SIZE];
+        let data2 = [0xBB; PAGE_SIZE];
+
+        engine.store_page(0, &data1).unwrap();
+        let used_1 = engine.backend_info().iter().map(|b| b.used_pages).sum::<u64>();
+
+        engine.store_page(0, &data2).unwrap();
+        let used_2 = engine.backend_info().iter().map(|b| b.used_pages).sum::<u64>();
+
+        let mut buf = [0u8; PAGE_SIZE];
+        engine.load_page(0, &mut buf).unwrap();
+        let data_correct = buf[0] == 0xBB;
+
+        if used_1 == 1 && used_2 == 1 && data_correct {
+            println!("PASS (used stays at 1 after re-store, data updated)");
+            tests_passed += 1;
+        } else {
+            println!("FAIL (used_1={}, used_2={}, data_correct={})", used_1, used_2, data_correct);
+            tests_failed += 1;
+        }
+    }
+
+    // =========================================================================
+    // Test 12: Config validation
+    // =========================================================================
+    print!("[12/12] Config validation... ");
+    {
+        // Default should pass
+        let t1 = DaemonConfig::default().validate().is_ok();
+
+        // Zero max_pages on enabled backend should fail
+        let mut bad = DaemonConfig::default();
+        bad.backends.memory = Some(duvm_daemon::config::MemoryBackendConfig { enabled: true, max_pages: 0 });
+        let t2 = bad.validate().is_err();
+
+        // Unknown strategy should fail
+        let mut bad2 = DaemonConfig::default();
+        bad2.policy.strategy = "unknown".to_string();
+        let t3 = bad2.validate().is_err();
+
+        // Disabled backend with zero pages should pass
+        let mut ok = DaemonConfig::default();
+        ok.backends.memory = Some(duvm_daemon::config::MemoryBackendConfig { enabled: false, max_pages: 0 });
+        let t4 = ok.validate().is_ok();
+
+        // CLI overrides
+        let mut cfg = DaemonConfig::default();
+        cfg.apply_cli_overrides(Some("/tmp/test.sock"), None);
+        let t5 = cfg.daemon.socket_path == "/tmp/test.sock";
+
+        if t1 && t2 && t3 && t4 && t5 {
+            println!("PASS (default-ok, zero-pages-fail, bad-strategy-fail, disabled-ok, cli-override)");
+            tests_passed += 1;
+        } else {
+            println!("FAIL (t1={} t2={} t3={} t4={} t5={})", t1, t2, t3, t4, t5);
+            tests_failed += 1;
+        }
+    }
+
+    // =========================================================================
     // Summary
     // =========================================================================
     let total_elapsed = total_start.elapsed();
@@ -543,7 +619,7 @@ fn main() {
         println!("  Proven capabilities:");
         println!("    - Engine store/load with byte-perfect data integrity (500 pages)");
         println!("    - LRU policy with tier cascading, capacity awareness, health checks");
-        println!("    - Capacity overflow detection with error stats tracking");
+        println!("    - LRU eviction under memory pressure (hot pages survive, cold evicted)");
         println!("    - Multi-backend cascading (compress full -> memory fallback)");
         println!("    - Invalidation with positive/negative verification");
         println!("    - Thread-safe concurrent operations (8 threads, 800 pages)");
@@ -551,5 +627,7 @@ fn main() {
         println!("    - TCP remote memory backend (100 pages round-tripped)");
         println!("    - libduvm Pool full lifecycle (1000 pages store/load/free)");
         println!("    - Lock-free ring buffer >1M ops/sec throughput");
+        println!("    - Double-store at same offset frees old handle (no leak)");
+        println!("    - Config validation (max_pages, strategy, CLI overrides)");
     }
 }
