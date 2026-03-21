@@ -23,6 +23,11 @@ pub struct Engine {
 }
 
 impl Engine {
+    /// Create a default config.
+    pub fn default_config() -> DaemonConfig {
+        DaemonConfig::default()
+    }
+
     pub fn new(config: DaemonConfig) -> Result<Self> {
         let mut backends: HashMap<u8, Box<dyn DuvmBackend>> = HashMap::new();
 

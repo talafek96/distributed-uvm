@@ -60,8 +60,8 @@ static DEFINE_XARRAY(duvm_page_store);
 /*
  * blk-mq queue_rq callback: processes block I/O requests.
  *
- * For WRITE (swap-out): Copy page data to local store (and ring buffer if daemon connected)
- * For READ (swap-in): Copy page data from local store (or ring buffer response)
+ * When daemon is connected: sends request through ring buffer + staging area.
+ * When daemon is not connected: uses local xarray page store as fallback.
  */
 static blk_status_t duvm_queue_rq(struct blk_mq_hw_ctx *hctx,
                                    const struct blk_mq_queue_data *bd)
@@ -70,11 +70,95 @@ static blk_status_t duvm_queue_rq(struct blk_mq_hw_ctx *hctx,
     sector_t sector = blk_rq_pos(rq);
     struct bio_vec bvec;
     struct req_iterator iter;
+    int is_write = (rq_data_dir(rq) == WRITE);
 
     blk_mq_start_request(rq);
 
-    if (rq_data_dir(rq) == WRITE) {
-        /* Swap-out: store page data */
+    /*
+     * Fast path: if daemon is connected, route through ring buffer.
+     * Each bio_vec segment is one page (swap I/O is always page-aligned).
+     */
+    if (duvm_dev.ring.daemon_connected) {
+        sector_t cur_sector = sector;
+
+        rq_for_each_segment(bvec, rq, iter) {
+            unsigned long idx = cur_sector / DUVM_PAGE_SECTORS;
+            __u32 staging_slot = idx % duvm_dev.ring.staging_pages;
+            struct duvm_request req = {};
+            struct duvm_completion comp = {};
+            void *staging_page;
+            int ret;
+
+            staging_page = (char *)duvm_dev.ring.staging +
+                           (staging_slot * PAGE_SIZE);
+
+            if (is_write) {
+                /* STORE: copy page data to staging, then submit */
+                void *src = kmap_local_page(bvec.bv_page) + bvec.bv_offset;
+                memcpy(staging_page, src, bvec.bv_len);
+                kunmap_local(src);
+
+                req.op = DUVM_OP_STORE;
+            } else {
+                /* LOAD: submit request, daemon fills staging, we copy out */
+                req.op = DUVM_OP_LOAD;
+            }
+
+            req.offset = idx;
+            req.staging_slot = staging_slot;
+
+            ret = duvm_ring_submit_and_wait(&duvm_dev.ring, &req,
+                                             &comp, 5000);
+            if (ret) {
+                /* Ring buffer failed — fall through to xarray fallback */
+                pr_warn_ratelimited("duvm: ring submit failed (%d), using local fallback\n", ret);
+                goto fallback_segment;
+            }
+
+            if (!is_write) {
+                /* LOAD complete: copy from staging to page */
+                void *dst = kmap_local_page(bvec.bv_page) + bvec.bv_offset;
+                memcpy(dst, staging_page, bvec.bv_len);
+                kunmap_local(dst);
+            }
+
+            cur_sector += bvec.bv_len / DUVM_SECTOR_SIZE;
+            continue;
+
+fallback_segment:
+            /* Fallback for this segment: use xarray */
+            if (is_write) {
+                void *src = kmap_local_page(bvec.bv_page) + bvec.bv_offset;
+                struct page *stored = xa_load(&duvm_page_store, idx);
+                if (!stored) {
+                    stored = alloc_page(GFP_NOIO);
+                    if (!stored) {
+                        kunmap_local(src);
+                        blk_mq_end_request(rq, BLK_STS_RESOURCE);
+                        return BLK_STS_OK;
+                    }
+                    xa_store(&duvm_page_store, idx, stored, GFP_NOIO);
+                }
+                memcpy(page_address(stored), src, bvec.bv_len);
+                kunmap_local(src);
+            } else {
+                void *dst = kmap_local_page(bvec.bv_page) + bvec.bv_offset;
+                struct page *stored = xa_load(&duvm_page_store, idx);
+                if (stored)
+                    memcpy(dst, page_address(stored), bvec.bv_len);
+                else
+                    memset(dst, 0, bvec.bv_len);
+                kunmap_local(dst);
+            }
+            cur_sector += bvec.bv_len / DUVM_SECTOR_SIZE;
+        }
+
+        blk_mq_end_request(rq, BLK_STS_OK);
+        return BLK_STS_OK;
+    }
+
+    /* Slow path: no daemon — use local xarray storage */
+    if (is_write) {
         sector_t cur_sector = sector;
 
         rq_for_each_segment(bvec, rq, iter) {
@@ -82,7 +166,6 @@ static blk_status_t duvm_queue_rq(struct blk_mq_hw_ctx *hctx,
             unsigned long idx = cur_sector / DUVM_PAGE_SECTORS;
             struct page *stored;
 
-            /* Allocate a page for storage if needed */
             stored = xa_load(&duvm_page_store, idx);
             if (!stored) {
                 stored = alloc_page(GFP_NOIO);
@@ -94,7 +177,6 @@ static blk_status_t duvm_queue_rq(struct blk_mq_hw_ctx *hctx,
                 xa_store(&duvm_page_store, idx, stored, GFP_NOIO);
             }
 
-            /* Copy data to stored page */
             memcpy(page_address(stored) + (bvec.bv_offset % PAGE_SIZE),
                    src, bvec.bv_len);
             kunmap_local(src);
@@ -102,7 +184,6 @@ static blk_status_t duvm_queue_rq(struct blk_mq_hw_ctx *hctx,
             cur_sector += bvec.bv_len / DUVM_SECTOR_SIZE;
         }
     } else {
-        /* Swap-in: load page data */
         sector_t cur_sector = sector;
 
         rq_for_each_segment(bvec, rq, iter) {
@@ -116,7 +197,6 @@ static blk_status_t duvm_queue_rq(struct blk_mq_hw_ctx *hctx,
                        page_address(stored) + (bvec.bv_offset % PAGE_SIZE),
                        bvec.bv_len);
             } else {
-                /* Page not found — return zeros */
                 memset(dst, 0, bvec.bv_len);
             }
             kunmap_local(dst);

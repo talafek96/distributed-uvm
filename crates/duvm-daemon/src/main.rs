@@ -4,6 +4,7 @@ use tracing_subscriber::EnvFilter;
 
 pub mod config;
 pub mod engine;
+pub mod kmod_ring;
 pub mod policy;
 pub mod uffd;
 
@@ -25,6 +26,10 @@ struct Args {
     /// Unix socket path for control
     #[arg(long, default_value = "/run/duvm/duvm.sock")]
     socket: String,
+
+    /// Path to kernel module control device
+    #[arg(long, default_value = "/dev/duvm_ctl")]
+    kmod_ctl: String,
 }
 
 #[tokio::main]
@@ -52,7 +57,43 @@ async fn main() -> Result<()> {
 
     tracing::info!(?config, "Configuration loaded");
 
-    let mut eng = engine::Engine::new(config)?;
+    let eng = engine::Engine::new(config)?;
+
+    // Try to connect to the kernel module ring buffer
+    if !args.uffd_mode {
+        match kmod_ring::KmodRingConsumer::open(&args.kmod_ctl) {
+            Ok(consumer) => {
+                tracing::info!(
+                    path = args.kmod_ctl,
+                    "Connected to kernel module — processing swap I/O"
+                );
+
+                // Run ring consumer in a background thread (it's a tight poll loop)
+                let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let stop_clone = stop.clone();
+
+                let consumer_thread = std::thread::spawn(move || {
+                    consumer.run_loop(&eng, &stop_clone);
+                });
+
+                // Wait for Ctrl+C
+                tokio::signal::ctrl_c().await?;
+                tracing::info!("Shutting down");
+                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                consumer_thread.join().ok();
+                return Ok(());
+            }
+            Err(e) => {
+                tracing::info!(
+                    error = %e,
+                    "Kernel module not available — running in daemon-only mode"
+                );
+            }
+        }
+    }
+
+    // Fallback: run as control socket server only (no kmod)
+    let mut eng = engine::Engine::new(engine::Engine::default_config())?;
     eng.run().await?;
 
     Ok(())
