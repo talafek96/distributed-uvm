@@ -7,6 +7,18 @@
 - Git commit messages should contain only the actual commit message — no agent attribution of any kind.
 
 
+## Product Goal
+
+The end product is a **service** that can be **enabled and disabled** across a cluster of machines. When enabled, all participating machines pool their RAM — any machine can transparently use memory from any other machine. When disabled, each machine uses only its own local RAM. This must work for unmodified applications (CPU and GPU workloads) without code changes.
+
+Key requirements:
+- **Enable/disable at runtime** — operators can turn distributed memory on/off without rebooting.
+- **Multi-machine** — not just two machines; the design must support N nodes in a cluster.
+- **Symmetric** — every node is both a memory consumer and a memory provider.
+- **Transparent** — applications don't know their memory is distributed. CPU and GPU both see a unified address space.
+- **Safe** — if the distributed layer crashes or is disabled, machines fall back to local swap or OOM. Never corrupt data.
+
+
 ## TODO List Management
 
 Manage a persistent TODO list using markdown files inside `~/todo/`.
