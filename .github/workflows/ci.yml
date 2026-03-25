@@ -56,6 +56,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -69,5 +71,11 @@ jobs:
             gzip \
             zstd \
             file
-      - name: Run QEMU system test
+      - name: Kernel module standalone (16 checks)
         run: bash scripts/test-kmod-qemu.sh
+      - name: Kmod + daemon ring buffer (10 checks)
+        run: bash scripts/test-kmod-daemon-qemu.sh
+      - name: Two-VM distributed (12 checks)
+        run: bash scripts/test-distributed-qemu.sh
+      - name: Mutual OOM degradation (9 checks)
+        run: bash scripts/test-mutual-oom-qemu.sh
