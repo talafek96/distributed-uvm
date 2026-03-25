@@ -231,6 +231,7 @@ timeout "$TIMEOUT" qemu-system-aarch64 \
     -append "console=ttyAMA0 panic=-1 quiet" \
     -nographic \
     -no-reboot \
+    -nic none \
     > "$SERIAL_LOG" 2>&1 || true
 
 echo ""
