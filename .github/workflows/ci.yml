@@ -71,6 +71,7 @@ jobs:
             qemu-system-arm \
             busybox-static \
             linux-headers-$(uname -r) \
+            linux-modules-extra-$(uname -r) \
             build-essential \
             binutils \
             cpio \
