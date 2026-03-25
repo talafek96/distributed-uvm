@@ -102,6 +102,16 @@ async fn send_command(socket_path: &str, cmd: &str) -> Result<String> {
 
 // ── Enable/Disable/Drain commands ──────────────────────────────────
 
+// Absolute paths for system commands — this tool runs as root via sudo,
+// so we must not rely on PATH (prevents privilege-escalation via PATH injection).
+const MODPROBE: &str = "/sbin/modprobe";
+const INSMOD: &str = "/sbin/insmod";
+const RMMOD: &str = "/sbin/rmmod";
+const MKSWAP: &str = "/sbin/mkswap";
+const SWAPON: &str = "/sbin/swapon";
+const SWAPOFF: &str = "/sbin/swapoff";
+const SYSTEMCTL: &str = "/usr/bin/systemctl";
+
 fn run(cmd: &str, args: &[&str]) -> Result<std::process::Output> {
     let output = Command::new(cmd)
         .args(args)
@@ -132,7 +142,7 @@ fn is_swap_active() -> bool {
 }
 
 fn is_service_active(name: &str) -> bool {
-    Command::new("systemctl")
+    Command::new(SYSTEMCTL)
         .args(["is-active", "--quiet", name])
         .status()
         .map(|s| s.success())
@@ -155,11 +165,12 @@ async fn cmd_enable(priority: i32, size_mb: u64) -> Result<()> {
         eprintln!("  [1/4] Kernel module already loaded");
     } else {
         eprintln!("  [1/4] Loading kernel module (size_mb={})...", size_mb);
-        run_ok("modprobe", &["duvm-kmod", &format!("size_mb={}", size_mb)])
+        let size_arg = format!("size_mb={}", size_mb);
+        run_ok(MODPROBE, &["duvm-kmod", &size_arg])
             .or_else(|_| {
                 // modprobe might fail if not installed via DKMS; try insmod
                 let ko_path = find_kmod_path()?;
-                run_ok("insmod", &[&ko_path, &format!("size_mb={}", size_mb)])
+                run_ok(INSMOD, &[&ko_path, &size_arg])
             })
             .context("Failed to load kernel module")?;
     }
@@ -171,30 +182,28 @@ async fn cmd_enable(priority: i32, size_mb: u64) -> Result<()> {
 
     if !is_swap_active() {
         eprintln!("  [2/4] Preparing swap device...");
-        run_ok("mkswap", &["/dev/duvm_swap0"])?;
+        run_ok(MKSWAP, &["/dev/duvm_swap0"])?;
     } else {
         eprintln!("  [2/4] Swap device already active");
     }
 
     // Step 3: Start services
+    // memserver is optional (this node may only consume remote memory, not serve it)
     eprintln!("  [3/4] Starting services...");
     if !is_service_active("duvm-memserver") {
-        let _ = run_ok("systemctl", &["start", "duvm-memserver"]);
-        if is_service_active("duvm-memserver") {
-            eprintln!("        duvm-memserver: started");
-        } else {
-            eprintln!("        duvm-memserver: not available (start manually if needed)");
+        match run_ok(SYSTEMCTL, &["start", "duvm-memserver"]) {
+            Ok(()) => eprintln!("        duvm-memserver: started"),
+            Err(e) => eprintln!("        duvm-memserver: {e} (optional, continuing)"),
         }
     } else {
         eprintln!("        duvm-memserver: already running");
     }
 
+    // daemon is required for distributed memory to function
     if !is_service_active("duvm-daemon") {
-        let _ = run_ok("systemctl", &["start", "duvm-daemon"]);
-        if is_service_active("duvm-daemon") {
-            eprintln!("        duvm-daemon: started");
-        } else {
-            eprintln!("        duvm-daemon: not available (start manually if needed)");
+        match run_ok(SYSTEMCTL, &["start", "duvm-daemon"]) {
+            Ok(()) => eprintln!("        duvm-daemon: started"),
+            Err(e) => eprintln!("        duvm-daemon: {e} (start manually if needed)"),
         }
     } else {
         eprintln!("        duvm-daemon: already running");
@@ -203,7 +212,8 @@ async fn cmd_enable(priority: i32, size_mb: u64) -> Result<()> {
     // Step 4: Activate swap
     if !is_swap_active() {
         eprintln!("  [4/4] Activating swap (priority={})...", priority);
-        run_ok("swapon", &["-p", &priority.to_string(), "/dev/duvm_swap0"])?;
+        let pri = priority.to_string();
+        run_ok(SWAPON, &["-p", &pri, "/dev/duvm_swap0"])?;
     } else {
         eprintln!("  [4/4] Swap already active");
     }
@@ -224,7 +234,7 @@ async fn cmd_disable() -> Result<()> {
     if is_swap_active() {
         eprintln!("  [1/4] Draining remote pages (swapoff)...");
         eprintln!("         This may take a while if many pages are remote.");
-        run_ok("swapoff", &["/dev/duvm_swap0"])
+        run_ok(SWAPOFF, &["/dev/duvm_swap0"])
             .context("swapoff failed — pages may still be in use")?;
         eprintln!("         Done — all pages back in local RAM.");
     } else {
@@ -234,7 +244,9 @@ async fn cmd_disable() -> Result<()> {
     // Step 2: Stop daemon
     if is_service_active("duvm-daemon") {
         eprintln!("  [2/4] Stopping daemon...");
-        let _ = run_ok("systemctl", &["stop", "duvm-daemon"]);
+        if let Err(e) = run_ok(SYSTEMCTL, &["stop", "duvm-daemon"]) {
+            eprintln!("         Warning: {e}");
+        }
     } else {
         eprintln!("  [2/4] Daemon not running");
     }
@@ -242,7 +254,9 @@ async fn cmd_disable() -> Result<()> {
     // Step 3: Stop memserver
     if is_service_active("duvm-memserver") {
         eprintln!("  [3/4] Stopping memserver...");
-        let _ = run_ok("systemctl", &["stop", "duvm-memserver"]);
+        if let Err(e) = run_ok(SYSTEMCTL, &["stop", "duvm-memserver"]) {
+            eprintln!("         Warning: {e}");
+        }
     } else {
         eprintln!("  [3/4] Memserver not running");
     }
@@ -250,7 +264,7 @@ async fn cmd_disable() -> Result<()> {
     // Step 4: Unload kernel module
     if is_module_loaded() {
         eprintln!("  [4/4] Unloading kernel module...");
-        run_ok("rmmod", &["duvm_kmod"]).context("rmmod failed — device may still be in use")?;
+        run_ok(RMMOD, &["duvm_kmod"]).context("rmmod failed — device may still be in use")?;
     } else {
         eprintln!("  [4/4] Kernel module not loaded");
     }
@@ -274,7 +288,7 @@ async fn cmd_drain() -> Result<()> {
     eprintln!("  This may take a while depending on how many pages are remote.");
     eprintln!();
 
-    run_ok("swapoff", &["/dev/duvm_swap0"])
+    run_ok(SWAPOFF, &["/dev/duvm_swap0"])
         .context("swapoff failed — some pages may still be remote")?;
 
     eprintln!("duvm: drain complete — all pages back in local RAM.");

@@ -108,24 +108,46 @@ impl DuvmBackend for TcpBackend {
     }
 
     fn alloc_page(&self) -> Result<PageHandle> {
-        let mut guard = self.get_stream()?;
-        let stream = guard.as_mut().unwrap();
-
-        // Send alloc request
-        stream.write_all(&[OP_ALLOC])?;
-        stream.flush()?;
-
-        // Read response: [status: u8][offset: u64]
-        let mut resp = [0u8; 9];
-        stream.read_exact(&mut resp)?;
-
-        if resp[0] != RESP_OK {
-            bail!("alloc failed on remote server");
+        // Reserve a slot atomically before talking to the remote server.
+        loop {
+            let used = self.pages_used.load(Ordering::Relaxed);
+            if used >= self.max_pages {
+                bail!("TCP backend full: {} pages", self.max_pages);
+            }
+            if self
+                .pages_used
+                .compare_exchange(used, used + 1, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                break;
+            }
         }
 
-        let offset = u64::from_le_bytes(resp[1..9].try_into().unwrap());
-        self.pages_used.fetch_add(1, Ordering::Relaxed);
-        Ok(PageHandle::new(self.backend_id, offset))
+        let result = (|| -> Result<PageHandle> {
+            let mut guard = self.get_stream()?;
+            let stream = guard.as_mut().unwrap();
+
+            // Send alloc request
+            stream.write_all(&[OP_ALLOC])?;
+            stream.flush()?;
+
+            // Read response: [status: u8][offset: u64]
+            let mut resp = [0u8; 9];
+            stream.read_exact(&mut resp)?;
+
+            if resp[0] != RESP_OK {
+                bail!("alloc failed on remote server");
+            }
+
+            let offset = u64::from_le_bytes(resp[1..9].try_into().unwrap());
+            Ok(PageHandle::new(self.backend_id, offset))
+        })();
+
+        if result.is_err() {
+            // Give back the reserved slot on failure.
+            self.pages_used.fetch_sub(1, Ordering::Relaxed);
+        }
+        result
     }
 
     fn free_page(&self, handle: PageHandle) -> Result<()> {

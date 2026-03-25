@@ -95,3 +95,5 @@ jobs:
         run: bash scripts/test-3machine-qemu.sh
       - name: RDMA end-to-end SoftiWARP (18 checks)
         run: bash scripts/test-rdma-qemu.sh
+      - name: Concurrent memserver clients (6 checks)
+        run: bash scripts/test-memserver-concurrent-qemu.sh

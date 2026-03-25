@@ -204,6 +204,76 @@ fn tcp_latency_tracking() {
     assert!(backend.avg_load_ns() < 10_000_000, "load >10ms");
 }
 
+/// Prove: TCP backend respects max_pages via CAS loop.
+/// Allocating beyond capacity returns an error instead of over-allocating.
+#[test]
+fn tcp_capacity_limit_enforced() {
+    let port = start_test_server();
+    let mut backend = TcpBackend::new(10, &format!("127.0.0.1:{}", port));
+    backend
+        .init(&BackendConfig {
+            max_pages: 5,
+            ..Default::default()
+        })
+        .unwrap();
+
+    // Fill to capacity
+    for i in 0..5 {
+        let h = backend.alloc_page().unwrap();
+        backend.store_page(h, &[i as u8; PAGE_SIZE]).unwrap();
+    }
+    assert_eq!(backend.capacity().1, 5);
+
+    // Next alloc should fail — not exceed max_pages
+    let result = backend.alloc_page();
+    assert!(
+        result.is_err(),
+        "alloc_page should fail when backend is full"
+    );
+    assert_eq!(
+        backend.capacity().1,
+        5,
+        "pages_used must not exceed max_pages"
+    );
+}
+
+/// Prove: freeing a page allows a new allocation when at capacity.
+#[test]
+fn tcp_capacity_recovers_after_free() {
+    let port = start_test_server();
+    let mut backend = TcpBackend::new(10, &format!("127.0.0.1:{}", port));
+    backend
+        .init(&BackendConfig {
+            max_pages: 3,
+            ..Default::default()
+        })
+        .unwrap();
+
+    let h1 = backend.alloc_page().unwrap();
+    let h2 = backend.alloc_page().unwrap();
+    let h3 = backend.alloc_page().unwrap();
+    assert!(backend.alloc_page().is_err(), "should be full at 3");
+
+    backend.free_page(h2).unwrap();
+    assert_eq!(backend.capacity().1, 2);
+
+    // Should succeed now
+    let h4 = backend.alloc_page().unwrap();
+    backend.store_page(h4, &[99u8; PAGE_SIZE]).unwrap();
+    assert_eq!(backend.capacity().1, 3);
+
+    // Verify data on the remaining pages
+    backend.store_page(h1, &[1u8; PAGE_SIZE]).unwrap();
+    backend.store_page(h3, &[3u8; PAGE_SIZE]).unwrap();
+    let mut buf = [0u8; PAGE_SIZE];
+    backend.load_page(h1, &mut buf).unwrap();
+    assert_eq!(buf[0], 1);
+    backend.load_page(h3, &mut buf).unwrap();
+    assert_eq!(buf[0], 3);
+    backend.load_page(h4, &mut buf).unwrap();
+    assert_eq!(buf[0], 99);
+}
+
 #[test]
 fn tcp_health_and_shutdown() {
     let port = start_test_server();
@@ -214,4 +284,48 @@ fn tcp_health_and_shutdown() {
     assert_eq!(backend.tier(), duvm_common::page::Tier::Rdma);
     backend.shutdown().unwrap();
     assert!(!backend.is_healthy());
+}
+
+/// Prove: multiple TCP clients can operate concurrently on the same server.
+/// Each client allocates, stores, and loads pages; all data stays isolated.
+#[test]
+fn tcp_concurrent_clients() {
+    let port = start_test_server();
+    let num_clients = 4;
+    let pages_per_client = 20;
+
+    let handles: Vec<_> = (0..num_clients)
+        .map(|client_id| {
+            let addr = format!("127.0.0.1:{}", port);
+            thread::spawn(move || {
+                let mut backend = TcpBackend::new(client_id as u8, &addr);
+                backend.init(&BackendConfig::default()).unwrap();
+
+                let mut page_handles = Vec::new();
+                for page_i in 0..pages_per_client {
+                    let h = backend.alloc_page().unwrap();
+                    // Each client writes a unique pattern: client_id * 64 + page_index
+                    let marker = ((client_id * 64 + page_i) % 256) as u8;
+                    backend.store_page(h, &[marker; PAGE_SIZE]).unwrap();
+                    page_handles.push((h, marker));
+                }
+
+                // Verify all pages
+                for (h, expected) in &page_handles {
+                    let mut buf = [0u8; PAGE_SIZE];
+                    backend.load_page(*h, &mut buf).unwrap();
+                    assert_eq!(
+                        buf[0], *expected,
+                        "client {} page data corrupted",
+                        client_id
+                    );
+                    assert_eq!(buf[PAGE_SIZE - 1], *expected);
+                }
+                page_handles.len()
+            })
+        })
+        .collect();
+
+    let total: usize = handles.into_iter().map(|h| h.join().unwrap()).sum();
+    assert_eq!(total, num_clients * pages_per_client);
 }
