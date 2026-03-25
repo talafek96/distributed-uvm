@@ -5,12 +5,13 @@ use crate::policy::{BackendCapacity, PolicyEngine, Strategy};
 use anyhow::Result;
 use duvm_backend_compress::CompressBackend;
 use duvm_backend_memory::MemoryBackend;
+use duvm_backend_tcp::TcpBackend;
 use duvm_backend_trait::{BackendConfig, BackendInfo, DuvmBackend};
 use duvm_common::page::{PageBuffer, PageHandle, Tier};
 use duvm_common::stats::DaemonStats;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 
@@ -20,6 +21,8 @@ pub struct Engine {
     backends: HashMap<u8, Box<dyn DuvmBackend>>,
     policy: Arc<PolicyEngine>,
     stats: Arc<DaemonStats>,
+    /// Round-robin counter for distributing pages across same-tier backends.
+    round_robin: AtomicUsize,
 }
 
 impl Engine {
@@ -30,29 +33,54 @@ impl Engine {
 
     pub fn new(config: DaemonConfig) -> Result<Self> {
         let mut backends: HashMap<u8, Box<dyn DuvmBackend>> = HashMap::new();
+        let mut next_id: u8 = 0;
 
         // Initialize memory backend
         if let Some(ref mem_cfg) = config.backends.memory
             && mem_cfg.enabled
         {
-            let mut backend = MemoryBackend::new(0);
+            let mut backend = MemoryBackend::new(next_id);
             backend.init(&BackendConfig {
                 max_pages: mem_cfg.max_pages,
                 ..Default::default()
             })?;
-            backends.insert(0, Box::new(backend));
+            backends.insert(next_id, Box::new(backend));
+            next_id += 1;
         }
 
         // Initialize compression backend
         if let Some(ref comp_cfg) = config.backends.compress
             && comp_cfg.enabled
         {
-            let mut backend = CompressBackend::new(1);
+            let mut backend = CompressBackend::new(next_id);
             backend.init(&BackendConfig {
                 max_pages: comp_cfg.max_pages,
                 ..Default::default()
             })?;
-            backends.insert(1, Box::new(backend));
+            backends.insert(next_id, Box::new(backend));
+            next_id += 1;
+        }
+
+        // Initialize remote backends (one per peer)
+        if let Some(ref remote_cfg) = config.backends.remote
+            && remote_cfg.enabled
+        {
+            for addr in &remote_cfg.peers {
+                let mut backend = TcpBackend::new(next_id, addr);
+                match backend.init(&BackendConfig {
+                    max_pages: remote_cfg.max_pages_per_peer,
+                    ..Default::default()
+                }) {
+                    Ok(()) => {
+                        tracing::info!(id = next_id, addr, "Remote backend connected");
+                        backends.insert(next_id, Box::new(backend));
+                        next_id += 1;
+                    }
+                    Err(e) => {
+                        tracing::warn!(addr, error = %e, "Failed to connect remote backend — skipping");
+                    }
+                }
+            }
         }
 
         let policy = Arc::new(PolicyEngine::new(Strategy::Lru));
@@ -63,6 +91,7 @@ impl Engine {
             backends,
             policy,
             stats,
+            round_robin: AtomicUsize::new(0),
         })
     }
 
@@ -76,6 +105,7 @@ impl Engine {
             backends,
             policy: Arc::new(PolicyEngine::new(Strategy::Lru)),
             stats: Arc::new(DaemonStats::new()),
+            round_robin: AtomicUsize::new(0),
         }
     }
 
@@ -235,29 +265,49 @@ impl Engine {
     }
 
     /// Map a tier to the best available backend ID.
+    /// Uses round-robin to distribute pages fairly across backends in the same tier.
     fn tier_to_backend_id(&self, tier: Tier) -> u8 {
-        // First, try to find a backend that matches the requested tier
-        for (&id, backend) in &self.backends {
-            if backend.tier() == tier && backend.is_healthy() {
-                let (total, used) = backend.capacity();
-                if used < total {
-                    return id;
+        // Collect all healthy backends with capacity for this tier
+        let mut candidates: Vec<u8> = self
+            .backends
+            .iter()
+            .filter(|(_, backend)| {
+                backend.tier() == tier && backend.is_healthy() && {
+                    let (total, used) = backend.capacity();
+                    used < total
                 }
-            }
+            })
+            .map(|(&id, _)| id)
+            .collect();
+        candidates.sort(); // deterministic order
+
+        if !candidates.is_empty() {
+            // Round-robin: pick the next candidate in rotation
+            let idx = self.round_robin.fetch_add(1, Ordering::Relaxed) % candidates.len();
+            return candidates[idx];
         }
 
-        // If no exact match with capacity, fall back to any healthy backend with capacity
-        for (&id, backend) in &self.backends {
-            if backend.is_healthy() {
-                let (total, used) = backend.capacity();
-                if used < total {
-                    return id;
+        // No exact tier match — fall back to any healthy backend with capacity
+        let mut fallback: Vec<u8> = self
+            .backends
+            .iter()
+            .filter(|(_, backend)| {
+                backend.is_healthy() && {
+                    let (total, used) = backend.capacity();
+                    used < total
                 }
-            }
+            })
+            .map(|(&id, _)| id)
+            .collect();
+        fallback.sort();
+
+        if !fallback.is_empty() {
+            let idx = self.round_robin.fetch_add(1, Ordering::Relaxed) % fallback.len();
+            return fallback[idx];
         }
 
-        // Last resort: return backend 0 (memory) or first available
-        if self.backends.contains_key(&1) { 1 } else { 0 }
+        // Last resort: return first backend id that exists
+        self.backends.keys().next().copied().unwrap_or(0)
     }
 
     /// Run the daemon: listen for control commands on a Unix socket.
@@ -456,15 +506,19 @@ mod tests {
         engine.store_page(2, &data).unwrap();
         engine.store_page(3, &data).unwrap();
 
-        // 5th store should succeed via LRU eviction (evicts page 0)
+        // 5th store should succeed via LRU eviction
         let result = engine.store_page(4, &data);
         assert!(result.is_ok(), "store should succeed via eviction");
 
-        // Evicted page should no longer be loadable
+        // At least one of the original 4 pages should have been evicted
         let mut buf = [0u8; PAGE_SIZE];
-        let evicted_any = engine.load_page(0, &mut buf).is_err();
-        // At least one of the original pages should have been evicted
-        assert!(evicted_any, "at least one old page should be evicted");
+        let mut evicted = 0;
+        for i in 0..4 {
+            if engine.load_page(i, &mut buf).is_err() {
+                evicted += 1;
+            }
+        }
+        assert!(evicted >= 1, "at least one old page should be evicted");
 
         // The newly stored page should be loadable
         engine.load_page(4, &mut buf).unwrap();

@@ -37,6 +37,8 @@ pub struct BackendsSection {
     pub memory: Option<MemoryBackendConfig>,
     #[serde(default)]
     pub compress: Option<CompressBackendConfig>,
+    #[serde(default)]
+    pub remote: Option<RemoteBackendConfig>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -53,6 +55,25 @@ pub struct CompressBackendConfig {
     pub enabled: bool,
     #[serde(default = "default_max_pages")]
     pub max_pages: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RemoteBackendConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Transport: "tcp" (default), "rdma", or "auto" (try RDMA, fall back to TCP)
+    #[serde(default = "default_transport")]
+    pub transport: String,
+    /// List of peer addresses (host:port) — one TCP/RDMA backend created per peer.
+    #[serde(default)]
+    pub peers: Vec<String>,
+    /// Maximum pages per peer.
+    #[serde(default = "default_max_pages")]
+    pub max_pages_per_peer: u64,
+}
+
+fn default_transport() -> String {
+    "tcp".to_string()
 }
 
 fn default_log_level() -> String {
@@ -107,6 +128,7 @@ impl Default for BackendsSection {
                 enabled: true,
                 max_pages: default_max_pages(),
             }),
+            remote: None,
         }
     }
 }
