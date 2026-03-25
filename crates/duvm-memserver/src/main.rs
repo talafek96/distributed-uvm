@@ -93,10 +93,19 @@ impl PageStore {
     }
 
     fn alloc_offset(&self) -> Option<u64> {
-        if self.used.load(Ordering::Relaxed) >= self.max_pages {
-            return None;
+        loop {
+            let used = self.used.load(Ordering::Relaxed);
+            if used >= self.max_pages {
+                return None;
+            }
+            if self
+                .used
+                .compare_exchange(used, used + 1, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                return Some(self.next_offset.fetch_add(1, Ordering::Relaxed));
+            }
         }
-        Some(self.next_offset.fetch_add(1, Ordering::Relaxed))
     }
 
     fn store(&self, offset: u64, data: Box<[u8; PAGE_SIZE]>) -> bool {
@@ -104,11 +113,7 @@ impl PageStore {
         if pages.len() as u64 >= self.max_pages && !pages.contains_key(&offset) {
             return false; // Full and this is a new page (not an overwrite)
         }
-        let is_new = !pages.contains_key(&offset);
         pages.insert(offset, data);
-        if is_new {
-            self.used.fetch_add(1, Ordering::Relaxed);
-        }
         true
     }
 
@@ -186,11 +191,15 @@ fn main() -> Result<()> {
             Ok(stream) => {
                 let peer = stream.peer_addr().ok();
                 eprintln!("  Client connected from {:?}", peer);
-                stream.set_nodelay(true)?;
-                let store = store.clone();
-                if let Err(e) = handle_client(stream, &store) {
-                    eprintln!("  Client disconnected: {}", e);
+                if let Err(e) = stream.set_nodelay(true) {
+                    eprintln!("  Warning: set_nodelay failed: {}", e);
                 }
+                let store = store.clone();
+                std::thread::spawn(move || {
+                    if let Err(e) = handle_client(stream, &store) {
+                        eprintln!("  Client {:?} disconnected: {}", peer, e);
+                    }
+                });
             }
             Err(e) => eprintln!("  Accept error: {}", e),
         }

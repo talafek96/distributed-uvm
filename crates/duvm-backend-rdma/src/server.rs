@@ -11,6 +11,7 @@
 use crate::{HANDSHAKE_SIZE, RdmaHandshake, ffi};
 use anyhow::{Result, bail};
 use duvm_common::page::PAGE_SIZE;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -99,6 +100,9 @@ impl RdmaMemServer {
         // Resources are allocated lazily on first connection
         let mut resources: Option<ServerResources> = None;
         let next_client_offset = AtomicU64::new(0);
+        // Track per-connection CQs so we can destroy them on disconnect.
+        // Key: conn_id pointer as usize, Value: CQ pointer.
+        let mut conn_cqs: HashMap<usize, *mut ffi::ibv_cq> = HashMap::new();
 
         // Event loop
         while self.running.load(Ordering::Relaxed) {
@@ -134,10 +138,15 @@ impl RdmaMemServer {
                         }
                     }
 
-                    if let Some(ref res) = resources
-                        && let Err(e) = self.handle_connect(res, conn_id, &next_client_offset)
-                    {
-                        eprintln!("  RDMA: connect failed: {}", e);
+                    if let Some(ref res) = resources {
+                        match self.handle_connect(res, conn_id, &next_client_offset) {
+                            Ok(cq) => {
+                                conn_cqs.insert(conn_id as usize, cq);
+                            }
+                            Err(e) => {
+                                eprintln!("  RDMA: connect failed: {}", e);
+                            }
+                        }
                     }
                 }
                 ffi::RDMA_CM_EVENT_ESTABLISHED => {
@@ -147,6 +156,10 @@ impl RdmaMemServer {
                     eprintln!("  RDMA: client disconnected");
                     unsafe {
                         ffi::rdma_disconnect(conn_id);
+                        // Destroy the per-connection CQ before destroying the ID
+                        if let Some(cq) = conn_cqs.remove(&(conn_id as usize)) {
+                            ffi::ibv_destroy_cq(cq);
+                        }
                         ffi::rdma_destroy_id(conn_id);
                     }
                 }
@@ -159,6 +172,10 @@ impl RdmaMemServer {
         }
 
         // Cleanup
+        // Destroy any remaining per-connection CQs
+        for (_, cq) in conn_cqs.drain() {
+            unsafe { ffi::ibv_destroy_cq(cq) };
+        }
         if let Some(res) = resources {
             unsafe {
                 ffi::ibv_dereg_mr(res.mr);
@@ -243,7 +260,7 @@ impl RdmaMemServer {
         res: &ServerResources,
         conn_id: *mut ffi::rdma_cm_id,
         next_client_offset: &AtomicU64,
-    ) -> Result<()> {
+    ) -> Result<*mut ffi::ibv_cq> {
         let client_offset_pages =
             next_client_offset.fetch_add(self.pages_per_client, Ordering::Relaxed);
         if client_offset_pages + self.pages_per_client > self.max_pages {
@@ -325,7 +342,7 @@ impl RdmaMemServer {
             res.rkey
         );
 
-        Ok(())
+        Ok(cq)
     }
 
     pub fn stop(&self) {

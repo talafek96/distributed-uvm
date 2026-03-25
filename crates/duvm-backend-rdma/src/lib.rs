@@ -538,12 +538,19 @@ impl DuvmBackend for RdmaBackend {
     }
 
     fn alloc_page(&self) -> Result<PageHandle> {
-        let used = self.pages_used.load(Ordering::Relaxed);
-        if used >= self.max_pages {
-            bail!("RDMA backend full: {} pages", self.max_pages);
+        loop {
+            let used = self.pages_used.load(Ordering::Relaxed);
+            if used >= self.max_pages {
+                bail!("RDMA backend full: {} pages", self.max_pages);
+            }
+            if self
+                .pages_used
+                .compare_exchange(used, used + 1, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                return Ok(PageHandle::new(self.backend_id, used));
+            }
         }
-        let offset = self.pages_used.fetch_add(1, Ordering::Relaxed);
-        Ok(PageHandle::new(self.backend_id, offset))
     }
 
     fn free_page(&self, _handle: PageHandle) -> Result<()> {

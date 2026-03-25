@@ -150,8 +150,8 @@ pub struct rdma_cm_event {
     pub param_srq: u8,
     _param_pad: u8,
     pub param_qp_num: u32,
-    // Pad to match C sizeof(rdma_cm_event) = 80 bytes. Offset here = 52.
-    _pad: [u8; 28],
+    // Pad to match C sizeof(rdma_cm_event) = 80 bytes. Offset here = 44.
+    _pad: [u8; 36],
 }
 
 #[repr(C)]
