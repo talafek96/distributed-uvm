@@ -48,3 +48,13 @@
 **Symptom:** `rustup could not choose a version of cargo to run`.
 **Cause:** User account was recreated, ~/.rustup/toolchains was lost.
 **Fix:** `rustup default stable`.
+
+## Mutual OOM deadlock: both machines full, swapping to each other
+
+**Symptom:** Machine A swaps to B, B allocates to store the page, B needs to swap, B swaps to A, A allocates... infinite recursion.
+**Cause:** The original memserver did `Box::new()` on every STORE — a heap allocation that could trigger swap on the receiving machine.
+**Fix:** Two-part fix:
+1. Memserver refuses STORE when at `max_pages` (returns RESP_ERR immediately, no allocation).
+2. Kernel module returns `BLK_STS_IOERR` when daemon returns an error, so the kernel tries the next swap device (local SSD).
+**Design rule:** Receiving a remote page must never trigger the receiver's swap path. Check capacity before allocating.
+**Commit:** 2bbfa1e
