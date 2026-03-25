@@ -265,10 +265,12 @@ impl Engine {
     }
 
     /// Map a tier to the best available backend ID.
-    /// Uses round-robin to distribute pages fairly across backends in the same tier.
+    /// Uses least-loaded selection to distribute pages fairly across backends
+    /// in the same tier. This ensures balanced utilization even when peers
+    /// have different capacities or different current load.
     fn tier_to_backend_id(&self, tier: Tier) -> u8 {
         // Collect all healthy backends with capacity for this tier
-        let mut candidates: Vec<u8> = self
+        let mut candidates: Vec<(u8, f64)> = self
             .backends
             .iter()
             .filter(|(_, backend)| {
@@ -277,18 +279,45 @@ impl Engine {
                     used < total
                 }
             })
-            .map(|(&id, _)| id)
+            .map(|(&id, backend)| {
+                let (total, used) = backend.capacity();
+                let utilization = if total == 0 {
+                    1.0
+                } else {
+                    used as f64 / total as f64
+                };
+                (id, utilization)
+            })
             .collect();
-        candidates.sort(); // deterministic order
 
         if !candidates.is_empty() {
-            // Round-robin: pick the next candidate in rotation
-            let idx = self.round_robin.fetch_add(1, Ordering::Relaxed) % candidates.len();
-            return candidates[idx];
+            // Pick the least loaded backend (lowest utilization).
+            // On ties, use round-robin to break the tie fairly.
+            candidates.sort_by(|a, b| {
+                a.1.partial_cmp(&b.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.cmp(&b.0))
+            });
+
+            let min_util = candidates[0].1;
+            // Count how many are tied at the minimum utilization
+            let tied: Vec<u8> = candidates
+                .iter()
+                .filter(|(_, u)| (*u - min_util).abs() < 0.001)
+                .map(|(id, _)| *id)
+                .collect();
+
+            if tied.len() > 1 {
+                // Break ties with round-robin
+                let idx = self.round_robin.fetch_add(1, Ordering::Relaxed) % tied.len();
+                return tied[idx];
+            }
+            return candidates[0].0;
         }
 
         // No exact tier match — fall back to any healthy backend with capacity
-        let mut fallback: Vec<u8> = self
+        // (same least-loaded logic)
+        let mut fallback: Vec<(u8, f64)> = self
             .backends
             .iter()
             .filter(|(_, backend)| {
@@ -297,13 +326,20 @@ impl Engine {
                     used < total
                 }
             })
-            .map(|(&id, _)| id)
+            .map(|(&id, backend)| {
+                let (total, used) = backend.capacity();
+                let utilization = if total == 0 {
+                    1.0
+                } else {
+                    used as f64 / total as f64
+                };
+                (id, utilization)
+            })
             .collect();
-        fallback.sort();
 
         if !fallback.is_empty() {
-            let idx = self.round_robin.fetch_add(1, Ordering::Relaxed) % fallback.len();
-            return fallback[idx];
+            fallback.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+            return fallback[0].0;
         }
 
         // Last resort: return first backend id that exists
