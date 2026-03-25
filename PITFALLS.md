@@ -80,3 +80,11 @@
 **Cause:** Modern rdma-core (libibverbs) uses `dlopen` with a compile-time search path (`/usr/lib/aarch64-linux-gnu/libibverbs/`). The `RDMAV_DRIVER_PATH` env var is ignored in newer versions.
 **Fix:** Copy `librxe-rdmav34.so` to both `/lib/libibverbs/` and `/usr/lib/aarch64-linux-gnu/libibverbs/` in the initramfs. The latter is the path libibverbs actually searches.
 **Commit:** d7e1a33
+
+## Hand-written FFI structs must match C sizes exactly
+
+**Symptom:** Potential UB from provider reading past Rust struct allocation on stack.
+**Cause:** `ibv_send_wr` Rust struct was 84 bytes but C struct is 128 bytes. Field offsets were correct (alignment padding coincidentally filled the `imm_data` gap), but total size was too small.
+**Fix:** Use `cc` to compile a size-check program against actual headers. Verified: `ibv_send_wr`=128, `ibv_wc`=48, `ibv_mr`=48, `rdma_cm_id`=416, `ibv_qp`=168. Set `_pad` arrays to match exact C sizes. Fields we access (`wr.rdma.remote_addr` at offset 40, `wr.rdma.rkey` at 48, `mr.lkey` at 36, `cm_id.verbs` at 0, `cm_id.qp` at 24) are all verified correct.
+**Rule:** Always run `offsetof()` checks against system headers before trusting hand-written FFI bindings.
+**Commit:** a9ddad4
