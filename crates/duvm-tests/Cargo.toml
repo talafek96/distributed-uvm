@@ -28,6 +28,7 @@ duvm-backend-trait = { workspace = true }
 duvm-backend-memory = { workspace = true }
 duvm-backend-compress = { workspace = true }
 duvm-backend-tcp = { workspace = true }
+duvm-backend-rdma = { workspace = true }
 duvm-daemon = { workspace = true }
 libduvm = { workspace = true }
 bytemuck = { workspace = true }

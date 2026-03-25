@@ -320,6 +320,7 @@ dependencies = [
  "bytemuck",
  "duvm-backend-compress",
  "duvm-backend-memory",
+ "duvm-backend-rdma",
  "duvm-backend-tcp",
  "duvm-backend-trait",
  "duvm-common",

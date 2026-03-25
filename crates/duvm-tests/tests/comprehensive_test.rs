@@ -858,6 +858,194 @@ log_level = "warn"
     assert_eq!(config.policy.strategy, "lru");
 }
 
+/// Prove: remote backend config transport field defaults to "tcp".
+#[test]
+fn config_remote_backend_transport_defaults_to_tcp() {
+    let toml_str = r#"
+[backends.remote]
+enabled = true
+peers = ["192.168.1.10:9000"]
+"#;
+
+    let config: DaemonConfig = toml::from_str(toml_str).unwrap();
+    let remote = config.backends.remote.as_ref().unwrap();
+    assert_eq!(remote.transport, "tcp");
+    assert!(remote.enabled);
+    assert_eq!(remote.peers.len(), 1);
+    assert_eq!(remote.peers[0], "192.168.1.10:9000");
+}
+
+/// Prove: remote backend config parses all transport modes.
+#[test]
+fn config_remote_backend_transport_modes() {
+    for mode in &["tcp", "rdma", "auto", "both"] {
+        let toml_str = format!(
+            r#"
+[backends.remote]
+enabled = true
+transport = "{}"
+peers = ["10.0.0.1:9000", "10.0.0.2:9000"]
+max_pages_per_peer = 2048
+"#,
+            mode
+        );
+
+        let config: DaemonConfig = toml::from_str(&toml_str).unwrap();
+        let remote = config.backends.remote.as_ref().unwrap();
+        assert_eq!(remote.transport, *mode, "transport should be '{}'", mode);
+        assert_eq!(remote.peers.len(), 2);
+        assert_eq!(remote.max_pages_per_peer, 2048);
+    }
+}
+
+/// Prove: remote backend with empty peers list creates no remote backends.
+#[test]
+fn config_remote_backend_empty_peers() {
+    let toml_str = r#"
+[backends.memory]
+enabled = true
+max_pages = 128
+
+[backends.remote]
+enabled = true
+transport = "rdma"
+peers = []
+"#;
+
+    let config: DaemonConfig = toml::from_str(toml_str).unwrap();
+    let remote = config.backends.remote.as_ref().unwrap();
+    assert!(remote.peers.is_empty());
+
+    // Engine should succeed — no peers means no remote backends to fail
+    let engine = Engine::new(config).unwrap();
+    let info = engine.backend_info();
+    // Should still have local memory backend
+    assert!(!info.is_empty());
+}
+
+/// Prove: remote backend disabled does not attempt connections.
+#[test]
+fn config_remote_backend_disabled() {
+    let toml_str = r#"
+[backends.memory]
+enabled = true
+max_pages = 128
+
+[backends.remote]
+enabled = false
+transport = "rdma"
+peers = ["10.0.0.1:9000"]
+"#;
+
+    let config: DaemonConfig = toml::from_str(toml_str).unwrap();
+    let remote = config.backends.remote.as_ref().unwrap();
+    assert!(!remote.enabled);
+
+    // Engine should succeed — disabled remote backend doesn't try RDMA
+    let engine = Engine::new(config).unwrap();
+    let info = engine.backend_info();
+    assert!(!info.is_empty());
+}
+
+/// Prove: transport="rdma" with no RDMA hardware fails with clear error.
+#[test]
+fn config_transport_rdma_without_hardware_fails() {
+    if duvm_backend_rdma::is_rdma_available() {
+        println!("RDMA available — skipping no-RDMA test");
+        return;
+    }
+
+    let toml_str = r#"
+[backends.remote]
+enabled = true
+transport = "rdma"
+peers = ["10.0.0.1:9000"]
+"#;
+
+    let config: DaemonConfig = toml::from_str(toml_str).unwrap();
+    let result = Engine::new(config);
+    assert!(result.is_err());
+    let err = result.err().unwrap().to_string();
+    assert!(
+        err.contains("RDMA") || err.contains("rdma"),
+        "error should mention RDMA: {}",
+        err
+    );
+}
+
+/// Prove: transport="auto" without RDMA hardware falls back to TCP mode.
+#[test]
+fn config_transport_auto_without_rdma_uses_tcp_mode() {
+    if duvm_backend_rdma::is_rdma_available() {
+        println!("RDMA available — skipping auto-fallback test");
+        return;
+    }
+
+    let toml_str = r#"
+[backends.memory]
+enabled = true
+max_pages = 128
+
+[backends.remote]
+enabled = true
+transport = "auto"
+peers = ["127.0.0.1:59999"]
+"#;
+
+    let config: DaemonConfig = toml::from_str(toml_str).unwrap();
+    // Engine creation should succeed (auto mode skips RDMA when unavailable).
+    // TCP connection to 127.0.0.1:59999 will fail but that's a warning, not an error.
+    let engine = Engine::new(config).unwrap();
+    // Local backends still work
+    let info = engine.backend_info();
+    assert!(!info.is_empty());
+}
+
+/// Prove: transport="tcp" ignores RDMA hardware (if any).
+#[test]
+fn config_transport_tcp_ignores_rdma() {
+    let toml_str = r#"
+[backends.memory]
+enabled = true
+max_pages = 128
+
+[backends.remote]
+enabled = true
+transport = "tcp"
+peers = ["127.0.0.1:59999"]
+"#;
+
+    let config: DaemonConfig = toml::from_str(toml_str).unwrap();
+    // Should succeed regardless of RDMA availability
+    let engine = Engine::new(config).unwrap();
+    let info = engine.backend_info();
+    assert!(!info.is_empty());
+}
+
+/// Prove: unknown transport value defaults to TCP (with warning).
+#[test]
+fn config_transport_unknown_defaults_to_tcp() {
+    let toml_str = r#"
+[backends.memory]
+enabled = true
+max_pages = 128
+
+[backends.remote]
+enabled = true
+transport = "carrier_pigeon"
+peers = ["127.0.0.1:59999"]
+"#;
+
+    let config: DaemonConfig = toml::from_str(toml_str).unwrap();
+    let remote = config.backends.remote.as_ref().unwrap();
+    assert_eq!(remote.transport, "carrier_pigeon"); // parsed as-is
+
+    // Engine should not fail — unknown transport falls back to TCP
+    let engine = Engine::new(config).unwrap();
+    let info = engine.backend_info();
+    assert!(!info.is_empty());
+}
+
 // ============================================================================
 // SECTION 8: libduvm Pool comprehensive tests
 // ============================================================================
