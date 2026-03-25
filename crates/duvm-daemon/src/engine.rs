@@ -107,7 +107,12 @@ impl Engine {
                         ..Default::default()
                     }) {
                         Ok(()) => {
-                            tracing::info!(id = next_id, addr, transport = "rdma", "Remote RDMA backend connected");
+                            tracing::info!(
+                                id = next_id,
+                                addr,
+                                transport = "rdma",
+                                "Remote RDMA backend connected"
+                            );
                             backends.insert(next_id, Box::new(backend));
                             next_id += 1;
                         }
@@ -121,7 +126,12 @@ impl Engine {
                                     ..Default::default()
                                 }) {
                                     Ok(()) => {
-                                        tracing::info!(id = next_id, addr, transport = "tcp", "Fell back to TCP after RDMA failure");
+                                        tracing::info!(
+                                            id = next_id,
+                                            addr,
+                                            transport = "tcp",
+                                            "Fell back to TCP after RDMA failure"
+                                        );
                                         backends.insert(next_id, Box::new(tcp_backend));
                                         next_id += 1;
                                         tcp_fallback_created = true;
@@ -142,7 +152,12 @@ impl Engine {
                         ..Default::default()
                     }) {
                         Ok(()) => {
-                            tracing::info!(id = next_id, addr, transport = "tcp", "Remote TCP backend connected");
+                            tracing::info!(
+                                id = next_id,
+                                addr,
+                                transport = "tcp",
+                                "Remote TCP backend connected"
+                            );
                             backends.insert(next_id, Box::new(backend));
                             next_id += 1;
                         }

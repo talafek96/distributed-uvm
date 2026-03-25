@@ -152,7 +152,7 @@ fn main() -> Result<()> {
         let tcp_port: u16 = args
             .bind
             .split(':')
-            .last()
+            .next_back()
             .unwrap_or("9200")
             .parse()
             .unwrap_or(9200);
@@ -170,7 +170,10 @@ fn main() -> Result<()> {
                 eprintln!("  RDMA server error: {}", e);
             }
         });
-        eprintln!("  RDMA listener: port={}, pages_per_client={}", rdma_port, args.rdma_pages_per_client);
+        eprintln!(
+            "  RDMA listener: port={}, pages_per_client={}",
+            rdma_port, args.rdma_pages_per_client
+        );
     }
 
     let store = Arc::new(PageStore::new(args.max_pages));

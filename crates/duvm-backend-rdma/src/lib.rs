@@ -37,22 +37,25 @@ pub struct RdmaHandshake {
 const HANDSHAKE_SIZE: usize = std::mem::size_of::<RdmaHandshake>();
 
 /// Wait for an RDMA CM event with a timeout. Returns the event pointer (must be acked).
+///
+/// # Safety
+/// `ec` must be a valid, non-null rdma_event_channel pointer.
 unsafe fn wait_cm_event(
     ec: *mut ffi::rdma_event_channel,
     timeout_ms: i32,
 ) -> Result<*mut ffi::rdma_cm_event> {
     // Use poll() on the event channel fd to avoid blocking forever
     let mut pfd = libc::pollfd {
-        fd: (*ec).fd,
+        fd: unsafe { (*ec).fd },
         events: libc::POLLIN,
         revents: 0,
     };
-    let ret = libc::poll(&mut pfd, 1, timeout_ms);
+    let ret = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
     if ret <= 0 {
         bail!("RDMA CM event timeout ({}ms)", timeout_ms);
     }
     let mut event: *mut ffi::rdma_cm_event = std::ptr::null_mut();
-    let ret = ffi::rdma_get_cm_event(ec, &mut event);
+    let ret = unsafe { ffi::rdma_get_cm_event(ec, &mut event) };
     if ret != 0 {
         bail!("rdma_get_cm_event failed: {}", ret);
     }
@@ -236,7 +239,7 @@ impl DuvmBackend for RdmaBackend {
         let port: u16 = self
             .addr
             .split(':')
-            .last()
+            .next_back()
             .unwrap_or("9200")
             .parse()
             .unwrap_or(9200);
@@ -248,7 +251,9 @@ impl DuvmBackend for RdmaBackend {
 
         // Parse IP using std::net
         let ip_str = self.addr.split(':').next().unwrap_or("127.0.0.1");
-        let ip: std::net::Ipv4Addr = ip_str.parse().map_err(|e| anyhow::anyhow!("bad IP: {}", e))?;
+        let ip: std::net::Ipv4Addr = ip_str
+            .parse()
+            .map_err(|e| anyhow::anyhow!("bad IP: {}", e))?;
         dst_addr.sin_addr.s_addr = u32::from_ne_bytes(ip.octets());
 
         let ret = unsafe {
@@ -285,7 +290,11 @@ impl DuvmBackend for RdmaBackend {
                 ffi::rdma_destroy_id(cm_id);
                 ffi::rdma_destroy_event_channel(ec);
             }
-            bail!("RDMA address resolution failed for {} (event={})", self.addr, addr_event);
+            bail!(
+                "RDMA address resolution failed for {} (event={})",
+                self.addr,
+                addr_event
+            );
         }
         unsafe { ffi::rdma_ack_cm_event(event) };
 
@@ -316,7 +325,11 @@ impl DuvmBackend for RdmaBackend {
                 ffi::rdma_destroy_id(cm_id);
                 ffi::rdma_destroy_event_channel(ec);
             }
-            bail!("RDMA route resolution failed for {} (event={})", self.addr, route_event);
+            bail!(
+                "RDMA route resolution failed for {} (event={})",
+                self.addr,
+                route_event
+            );
         }
         unsafe { ffi::rdma_ack_cm_event(event) };
 
@@ -331,7 +344,15 @@ impl DuvmBackend for RdmaBackend {
         }
 
         // Create CQ
-        let cq = unsafe { ffi::ibv_create_cq((*cm_id).verbs, 16, std::ptr::null_mut(), std::ptr::null_mut(), 0) };
+        let cq = unsafe {
+            ffi::ibv_create_cq(
+                (*cm_id).verbs,
+                16,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                0,
+            )
+        };
         if cq.is_null() {
             unsafe {
                 ffi::ibv_dealloc_pd(pd);
@@ -463,7 +484,11 @@ impl DuvmBackend for RdmaBackend {
                 ffi::rdma_destroy_id(cm_id);
                 ffi::rdma_destroy_event_channel(ec);
             }
-            bail!("RDMA connection failed for {} (event={})", self.addr, conn_event);
+            bail!(
+                "RDMA connection failed for {} (event={})",
+                self.addr,
+                conn_event
+            );
         }
 
         // Extract server's handshake (rkey/addr/size) from connection event's private data.
@@ -479,7 +504,10 @@ impl DuvmBackend for RdmaBackend {
                 ffi::ibv_dealloc_pd(pd);
                 ffi::rdma_destroy_id(cm_id);
                 ffi::rdma_destroy_event_channel(ec);
-                bail!("Server did not send RDMA handshake (private_data_len={})", plen);
+                bail!(
+                    "Server did not send RDMA handshake (private_data_len={})",
+                    plen
+                );
             }
             std::ptr::read_unaligned(pdata as *const RdmaHandshake)
         };

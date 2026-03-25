@@ -30,6 +30,8 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Install RDMA dev libs
+        run: sudo apt-get update && sudo apt-get install -y libibverbs-dev librdmacm-dev
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
   test:
@@ -39,6 +41,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Install RDMA dev libs
+        run: sudo apt-get update && sudo apt-get install -y libibverbs-dev librdmacm-dev
       - run: cargo test --workspace
 
   build:
@@ -48,6 +52,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Install RDMA dev libs
+        run: sudo apt-get update && sudo apt-get install -y libibverbs-dev librdmacm-dev
       - run: cargo build --workspace
 
   e2e-kmod:
@@ -70,7 +76,9 @@ jobs:
             cpio \
             gzip \
             zstd \
-            file
+            file \
+            libibverbs-dev \
+            librdmacm-dev
       - name: Kernel module standalone (16 checks)
         run: bash scripts/test-kmod-qemu.sh
       - name: Kmod + daemon ring buffer (10 checks)

@@ -8,11 +8,11 @@
 //! After connection setup, the server has no data-path involvement — the NIC
 //! handles RDMA WRITE/READ directly to the registered buffer.
 
-use crate::{ffi, RdmaHandshake, HANDSHAKE_SIZE};
+use crate::{HANDSHAKE_SIZE, RdmaHandshake, ffi};
 use anyhow::{Result, bail};
 use duvm_common::page::PAGE_SIZE;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// RDMA memory server. Allocates a contiguous buffer, registers it with the NIC,
 /// and accepts RDMA CM connections. Clients get the rkey and their slice address
@@ -75,9 +75,8 @@ impl RdmaMemServer {
         addr.sin_family = libc::AF_INET as u16;
         addr.sin_port = self.port.to_be();
 
-        let ret = unsafe {
-            ffi::rdma_bind_addr(listen_id, &mut addr as *mut _ as *mut libc::sockaddr)
-        };
+        let ret =
+            unsafe { ffi::rdma_bind_addr(listen_id, &mut addr as *mut _ as *mut libc::sockaddr) };
         if ret != 0 {
             unsafe {
                 ffi::rdma_destroy_id(listen_id);
@@ -135,12 +134,10 @@ impl RdmaMemServer {
                         }
                     }
 
-                    if let Some(ref res) = resources {
-                        if let Err(e) =
-                            self.handle_connect(res, conn_id, &next_client_offset)
-                        {
-                            eprintln!("  RDMA: connect failed: {}", e);
-                        }
+                    if let Some(ref res) = resources
+                        && let Err(e) = self.handle_connect(res, conn_id, &next_client_offset)
+                    {
+                        eprintln!("  RDMA: connect failed: {}", e);
                     }
                 }
                 ffi::RDMA_CM_EVENT_ESTABLISHED => {
@@ -247,7 +244,8 @@ impl RdmaMemServer {
         conn_id: *mut ffi::rdma_cm_id,
         next_client_offset: &AtomicU64,
     ) -> Result<()> {
-        let client_offset_pages = next_client_offset.fetch_add(self.pages_per_client, Ordering::Relaxed);
+        let client_offset_pages =
+            next_client_offset.fetch_add(self.pages_per_client, Ordering::Relaxed);
         if client_offset_pages + self.pages_per_client > self.max_pages {
             eprintln!(
                 "  RDMA: refusing connection — out of capacity ({} of {})",
@@ -262,9 +260,8 @@ impl RdmaMemServer {
 
         // Create CQ for this connection
         let verbs = unsafe { (*conn_id).verbs };
-        let cq = unsafe {
-            ffi::ibv_create_cq(verbs, 16, std::ptr::null_mut(), std::ptr::null_mut(), 0)
-        };
+        let cq =
+            unsafe { ffi::ibv_create_cq(verbs, 16, std::ptr::null_mut(), std::ptr::null_mut(), 0) };
         if cq.is_null() {
             unsafe { ffi::rdma_destroy_id(conn_id) };
             bail!("ibv_create_cq failed");
