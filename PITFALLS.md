@@ -117,3 +117,19 @@
 **Cause:** `rdma_get_cm_event` is a blocking call with no timeout. If the RDMA server is down or unreachable, the daemon blocks indefinitely.
 **Fix:** Use `poll()` on the event channel fd (`ec->fd`) before calling `rdma_get_cm_event`. Added `wait_cm_event(ec, timeout_ms)` helper. Connect timeout = 10s, resolve timeouts = 5s.
 **Commit:** b064cba
+
+## TCP backend alloc_page TOCTOU was missed in bulk fix
+
+**Symptom:** RDMA backend and memserver `alloc_page()` TOCTOU races were fixed with `compare_exchange` CAS loops, but TCP backend was overlooked — still used `fetch_add(1)` with no capacity check.
+**Cause:** The bug report said "Same pattern in TCP backend and memserver" but the fix only covered RDMA and memserver. TCP backend's `alloc_page()` is different (it talks to a remote server first), so it wasn't caught by a simple grep.
+**Fix:** Added CAS loop to TCP backend's `alloc_page()`: reserve a slot atomically before the remote call, release it on failure. Added `tcp_capacity_limit_enforced` and `tcp_capacity_recovers_after_free` tests.
+**Lesson:** When a bug report lists N locations, verify all N are fixed. Add a test for each.
+**Commit:** c6c424a
+
+## duvm-ctl ran system commands via relative PATH as root
+
+**Symptom:** `duvm-ctl enable` called `modprobe`, `systemctl` etc. by name without full paths — vulnerable to PATH injection when running as root via sudo.
+**Cause:** Used `Command::new("modprobe")` instead of `Command::new("/sbin/modprobe")`.
+**Fix:** Added constants for all system commands with absolute paths (`/sbin/modprobe`, `/usr/bin/systemctl`, etc.).
+**Lesson:** Any tool that calls `check_root()` / runs as root must use absolute paths for all subprocess calls.
+**Commit:** c6c424a

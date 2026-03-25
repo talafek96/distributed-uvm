@@ -18,19 +18,20 @@
 | Two-VM distributed test | VM-A (kmod+daemon) talks to VM-B (memserver), 12/12 | `bash scripts/test-distributed-qemu.sh` |
 | Kernel module standalone | insmod, mkswap, swapon, block I/O, rmmod — 16/16 QEMU | `bash scripts/test-kmod-qemu.sh` |
 | Cross-machine TCP (real hardware) | 10,000 pages calc1↔calc2 over ConnectX-7, byte-perfect | `cargo run --example demo_distributed --release -p duvm-daemon` |
-| Engine + policy + eviction + transport | LRU, tier cascading, transport modes, 189 Rust tests | `cargo test` |
+| Engine + policy + eviction + transport | LRU, tier cascading, transport modes, 192 Rust tests | `cargo test` |
 
 ### Test Summary
 
 | Test | Checks | What it proves |
 |---|---|---|
-| `cargo test` | 189 pass | User-space engine, policy, backends, config, transport modes |
+| `cargo test` | 192 pass | User-space engine, policy, backends, config, transport modes, TCP capacity |
 | `test-kmod-qemu.sh` | 16/16 | Kernel module: load, block I/O, swap, unload |
 | `test-kmod-daemon-qemu.sh` | 10/10 | Ring buffer: kmod → daemon → engine → backend |
 | `test-distributed-qemu.sh` | 12/12 | Two VMs: kmod+daemon on A, memserver on B, network I/O |
 | `test-mutual-oom-qemu.sh` | 9/9 | Two VMs: mutual OOM degradation, graceful fallback |
 | `test-3machine-qemu.sh` | 10/10 | Three VMs: fair distribution across peers, exhaustion handling |
 | `test-rdma-qemu.sh` | 18/18 | **Full RDMA: SoftiWARP, CM handshake, one-sided WRITE/READ, data integrity** |
+| `test-memserver-concurrent-qemu.sh` | 6/6 | **Concurrent TCP clients: parallel alloc, capacity enforcement under load** |
 
 All QEMU tests run in CI (`e2e-kmod` job on `ubuntu-24.04-arm`).
 
@@ -93,14 +94,14 @@ sudo bash scripts/setup-kmod-for-testing.sh --teardown  # Cleanup
 | Gap | Status | Detail |
 |---|---|---|
 | ~~RDMA server CQ leak~~ | **Fixed** | Per-connection CQs tracked in HashMap, destroyed on disconnect and shutdown. |
-| ~~`alloc_page()` TOCTOU race~~ | **Fixed** | Replaced load-then-fetch_add with `compare_exchange` loop in RDMA backend and memserver. |
+| ~~`alloc_page()` TOCTOU race~~ | **Fixed** | Replaced load-then-fetch_add with `compare_exchange` loop in RDMA backend, TCP backend, and memserver. |
 | ~~`rdma_cm_event` struct padding~~ | **Fixed** | `_pad: [u8; 36]` now matches real `sizeof(rdma_cm_event) = 80`. |
 
 ### Operational — Phase 2 complete
 
 | Gap | Status | Detail |
 |---|---|---|
-| ~~No enable/disable service~~ | **Fixed** | `duvm-ctl enable/disable/drain` + systemd units for daemon, memserver, kmod. |
+| ~~No enable/disable service~~ | **Fixed** | `duvm-ctl enable/disable/drain` + systemd units for daemon, memserver, kmod. Uses absolute paths for security. |
 | ~~No graceful drain~~ | **Fixed** | `duvm-ctl drain` runs swapoff, migrating remote pages back to local RAM. |
 | ~~Memserver single-threaded~~ | **Fixed** | `thread::spawn` per TCP client. Multiple clients served concurrently. |
 
