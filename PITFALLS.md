@@ -58,3 +58,11 @@
 2. Kernel module returns `BLK_STS_IOERR` when daemon returns an error, so the kernel tries the next swap device (local SSD).
 **Design rule:** Receiving a remote page must never trigger the receiver's swap path. Check capacity before allocating.
 **Commit:** 2bbfa1e
+
+## SoftRoCE in QEMU needs provider config
+
+**Symptom:** `ibv_devices` shows no devices even though rxe0 exists in sysfs.
+**Cause:** libibverbs needs `/etc/libibverbs.d/rxe.driver` containing `driver rxe` to find the provider library.
+**Fix:** Create the config file in the initramfs. Also copy librxe provider .so and all libibverbs deps.
+**Modules needed:** udp_tunnel, ip6_udp_tunnel, ib_core, ib_uverbs, rdma_rxe (all .ko.zst, decompress with zstd).
+**Verification:** `ibv_devices` shows `rxe0` with a GUID.
