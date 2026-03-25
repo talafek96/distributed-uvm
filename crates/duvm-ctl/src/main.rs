@@ -159,10 +159,7 @@ async fn cmd_enable(priority: i32, size_mb: u64) -> Result<()> {
             .or_else(|_| {
                 // modprobe might fail if not installed via DKMS; try insmod
                 let ko_path = find_kmod_path()?;
-                run_ok(
-                    "insmod",
-                    &[&ko_path, &format!("size_mb={}", size_mb)],
-                )
+                run_ok("insmod", &[&ko_path, &format!("size_mb={}", size_mb)])
             })
             .context("Failed to load kernel module")?;
     }
@@ -253,8 +250,7 @@ async fn cmd_disable() -> Result<()> {
     // Step 4: Unload kernel module
     if is_module_loaded() {
         eprintln!("  [4/4] Unloading kernel module...");
-        run_ok("rmmod", &["duvm_kmod"])
-            .context("rmmod failed — device may still be in use")?;
+        run_ok("rmmod", &["duvm_kmod"]).context("rmmod failed — device may still be in use")?;
     } else {
         eprintln!("  [4/4] Kernel module not loaded");
     }
@@ -289,10 +285,7 @@ async fn cmd_drain() -> Result<()> {
 
 fn find_kmod_path() -> Result<String> {
     // Try common locations
-    let candidates = [
-        "/lib/modules/duvm-kmod.ko",
-        "/usr/local/lib/duvm-kmod.ko",
-    ];
+    let candidates = ["/lib/modules/duvm-kmod.ko", "/usr/local/lib/duvm-kmod.ko"];
     for path in &candidates {
         if std::path::Path::new(path).exists() {
             return Ok(path.to_string());
