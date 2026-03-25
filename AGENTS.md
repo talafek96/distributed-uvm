@@ -15,8 +15,35 @@ Key requirements:
 - **Enable/disable at runtime** — operators can turn distributed memory on/off without rebooting.
 - **Multi-machine** — not just two machines; the design must support N nodes in a cluster.
 - **Symmetric** — every node is both a memory consumer and a memory provider.
-- **Transparent** — applications don't know their memory is distributed. CPU and GPU both see a unified address space.
+- **Transparent** — applications don't know their memory is distributed. CPU and GPU both see a unified address space. No application code changes, no library linking, no LD_PRELOAD. The kernel's swap system handles everything under the hood.
 - **Safe** — if the distributed layer crashes or is disabled, machines fall back to local swap or OOM. Never corrupt data.
+- **Performance-critical** — every microsecond of latency in the page fault path matters. The daemon must respond to kernel requests as fast as possible. Use event-driven wakeups, not polling with sleep. Minimize copies. RDMA for production.
+
+
+## Architecture: How Transparency Works
+
+The system is transparent because it operates at the **kernel swap layer**, not at the application layer:
+
+1. The kernel module (`duvm-kmod`) creates `/dev/duvm_swap0` — a standard Linux swap block device.
+2. An admin runs `swapon /dev/duvm_swap0` — the kernel now uses it for swap, like any swap file.
+3. When any application's memory needs to be swapped out, the kernel writes pages to our device.
+4. Our device forwards them (via ring buffer) to the daemon, which sends them to a remote machine.
+5. When the application touches the swapped page, the kernel faults it back through the same path.
+
+**Applications never call our library.** The `libduvm` crate exists as an optional explicit API for power users — it is NOT required for transparency. The transparent path requires zero application changes.
+
+The `duvm-memserver` process on each remote machine stores received pages **in RAM** (a HashMap of heap-allocated 4KB buffers), not on disk. Each TCP connection gets its own page namespace, so pages from different machines cannot collide. The kernel's swap allocator assigns unique slot numbers, so pages from different processes on the same machine cannot collide either.
+
+
+## Documentation Requirement
+
+The architecture documents (`DECISIONS.md`, `HANDOFF.md`, `research/`) must always explain:
+- **How transparency works** — the swap-layer approach, why apps don't need changes.
+- **Where pages are stored** — in RAM on the remote machine's memserver process, not on disk.
+- **Why pages don't collide** — kernel assigns unique swap slots; each TCP connection has its own namespace.
+- **The performance path** — every step from page fault to remote store and back, with latency expectations.
+
+When making architectural changes, update these explanations. A new contributor should be able to read the docs and understand the full page lifecycle without reading code.
 
 
 ## TODO List Management
