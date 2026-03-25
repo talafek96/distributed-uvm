@@ -66,3 +66,17 @@
 **Fix:** Create the config file in the initramfs. Also copy librxe provider .so and all libibverbs deps.
 **Modules needed:** udp_tunnel, ip6_udp_tunnel, ib_core, ib_uverbs, rdma_rxe (all .ko.zst, decompress with zstd).
 **Verification:** `ibv_devices` shows `rxe0` with a GUID.
+
+## ibv_post_send / ibv_poll_cq are inline functions
+
+**Symptom:** Linker error: `undefined reference to ibv_post_send` / `ibv_poll_cq` when linking against libibverbs.
+**Cause:** These are `static inline` functions in `<infiniband/verbs.h>`, not exported symbols in `libibverbs.so`. They call through function pointers in the QP/CQ context structures.
+**Fix:** Created a C shim (`crates/duvm-backend-rdma/src/shim.c`) with wrapper functions `duvm_ibv_post_send` and `duvm_ibv_poll_cq`. Used `#[link_name]` attribute in the FFI bindings to map Rust names to shim names. Compiled via `cc` crate in `build.rs`.
+**Commit:** 5ca616b
+
+## SoftRoCE provider library must be at compile-time path
+
+**Symptom:** `libibverbs: Warning: couldn't load driver 'librxe-rdmav34.so'` in QEMU VM even with `RDMAV_DRIVER_PATH` set.
+**Cause:** Modern rdma-core (libibverbs) uses `dlopen` with a compile-time search path (`/usr/lib/aarch64-linux-gnu/libibverbs/`). The `RDMAV_DRIVER_PATH` env var is ignored in newer versions.
+**Fix:** Copy `librxe-rdmav34.so` to both `/lib/libibverbs/` and `/usr/lib/aarch64-linux-gnu/libibverbs/` in the initramfs. The latter is the path libibverbs actually searches.
+**Commit:** d7e1a33
