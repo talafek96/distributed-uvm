@@ -46,7 +46,7 @@ const RESP_ERR: u8 = 1;
 #[derive(Parser)]
 #[command(name = "duvm-memserver", about = "Remote memory server for duvm")]
 struct Args {
-    /// Address to bind to
+    /// Address to bind to (for TCP)
     #[arg(short, long, default_value = "0.0.0.0:9200")]
     bind: String,
 
@@ -55,6 +55,16 @@ struct Args {
     /// The memserver refuses STORE requests when this limit is reached.
     #[arg(short, long, default_value = "1000000")]
     max_pages: u64,
+
+    /// Enable RDMA listener (requires RDMA hardware or SoftRoCE).
+    /// When enabled, clients can connect via RDMA for one-sided page transfers.
+    /// TCP listener still runs alongside for non-RDMA clients.
+    #[arg(long)]
+    rdma: bool,
+
+    /// Maximum pages per RDMA client (each client gets its own slice of the buffer).
+    #[arg(long, default_value = "100000")]
+    rdma_pages_per_client: u64,
 }
 
 /// Shared page storage. All connections share one pool with one capacity limit.
@@ -131,6 +141,31 @@ fn main() -> Result<()> {
         args.max_pages as f64 * PAGE_SIZE as f64 / 1e9
     );
     eprintln!("  When full: refuses STORE → client falls back to next swap device");
+
+    // Start RDMA listener in a background thread if requested
+    if args.rdma {
+        let port: u16 = args
+            .bind
+            .split(':')
+            .last()
+            .unwrap_or("9200")
+            .parse()
+            .unwrap_or(9200);
+        let rdma_max_pages = args.max_pages;
+        let rdma_pages_per_client = args.rdma_pages_per_client;
+
+        std::thread::spawn(move || {
+            let server = duvm_backend_rdma::server::RdmaMemServer::new(
+                port,
+                rdma_max_pages,
+                rdma_pages_per_client,
+            );
+            if let Err(e) = server.run() {
+                eprintln!("  RDMA server error: {}", e);
+            }
+        });
+        eprintln!("  RDMA listener: enabled (pages_per_client={})", args.rdma_pages_per_client);
+    }
 
     let store = Arc::new(PageStore::new(args.max_pages));
 

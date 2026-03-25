@@ -133,8 +133,19 @@ pub struct rdma_cm_event {
     pub listen_id: *mut rdma_cm_id,
     pub event: c_int,
     pub status: c_int,
-    // Connection parameters follow
-    _pad: [u8; 64],
+    // param union starts at offset 24 — first variant is rdma_conn_param
+    pub param_private_data: *const c_void,
+    pub param_private_data_len: u8,
+    pub param_responder_resources: u8,
+    pub param_initiator_depth: u8,
+    pub param_flow_control: u8,
+    pub param_retry_count: u8,
+    pub param_rnr_retry_count: u8,
+    pub param_srq: u8,
+    _param_pad: u8,
+    pub param_qp_num: u32,
+    // Pad to match C sizeof(rdma_cm_event) = 80 bytes. Offset here = 52.
+    _pad: [u8; 28],
 }
 
 #[repr(C)]
@@ -147,7 +158,9 @@ pub struct rdma_conn_param {
     pub retry_count: u8,
     pub rnr_retry_count: u8,
     pub srq: u8,
+    pub(crate) _pad: u8, // align qp_num to offset 16
     pub qp_num: u32,
+    pub(crate) _pad2: [u8; 4], // pad to sizeof = 24
 }
 
 #[repr(C)]
@@ -159,6 +172,7 @@ pub struct ibv_qp_init_attr {
     pub cap: ibv_qp_cap,
     pub qp_type: c_int,
     pub sq_sig_all: c_int,
+    pub(crate) _pad: [u8; 4], // match C sizeof = 64
 }
 
 #[repr(C)]

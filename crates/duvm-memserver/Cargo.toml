@@ -11,5 +11,6 @@ path = "src/main.rs"
 
 [dependencies]
 duvm-common = { workspace = true }
+duvm-backend-rdma = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }

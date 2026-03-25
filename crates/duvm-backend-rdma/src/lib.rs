@@ -10,6 +10,7 @@
 //! Falls back gracefully if no RDMA devices are available.
 
 pub mod ffi;
+pub mod server;
 
 use anyhow::{Result, bail};
 use duvm_backend_trait::{BackendConfig, DuvmBackend};
@@ -22,17 +23,25 @@ pub fn is_rdma_available() -> bool {
     ffi::rdma_available()
 }
 
+/// Handshake data exchanged via RDMA CM private_data during connect/accept.
+/// Server sends its rkey + base address so the client can do one-sided RDMA WRITE/READ.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct RdmaHandshake {
+    pub rkey: u32,
+    pub _pad: u32,
+    pub addr: u64,
+    pub size: u64,
+}
+
+const HANDSHAKE_SIZE: usize = std::mem::size_of::<RdmaHandshake>();
+
 /// RDMA backend using one-sided RDMA WRITE/READ.
 ///
-/// For now, this uses a TCP-based control channel to exchange memory region
-/// info, then does RDMA for the data path. This is a pragmatic first
-/// implementation that works with both real RDMA and SoftRoCE.
-///
-/// The connection setup sends:
-///   Client → Server: "RDMA_SETUP" + local rkey + local addr
-///   Server → Client: remote rkey + remote addr + remote size
-///
-/// After setup, store/load use ibv_post_send with RDMA WRITE/READ.
+/// Connection setup via RDMA CM. The server's rkey and buffer address are
+/// exchanged via RDMA CM private data during the connect/accept handshake.
+/// After setup, store_page uses RDMA WRITE and load_page uses RDMA READ —
+/// zero remote CPU involvement on the data path.
 pub struct RdmaBackend {
     name: String,
     addr: String,
@@ -353,6 +362,7 @@ impl DuvmBackend for RdmaBackend {
             },
             qp_type: ffi::IBV_QPT_RC,
             sq_sig_all: 0,
+            _pad: [0; 4],
         };
 
         let ret = unsafe { ffi::rdma_create_qp(cm_id, pd, &mut qp_attr) };
@@ -407,17 +417,33 @@ impl DuvmBackend for RdmaBackend {
             }
             bail!("RDMA connection failed (event={})", ev);
         }
+
+        // Extract server's handshake (rkey/addr/size) from connection event's private data.
+        // Must read BEFORE acking the event.
+        let handshake = unsafe {
+            let pdata = (*event).param_private_data;
+            let plen = (*event).param_private_data_len;
+            if pdata.is_null() || (plen as usize) < HANDSHAKE_SIZE {
+                ffi::rdma_ack_cm_event(event);
+                ffi::ibv_dereg_mr(mr);
+                libc::munmap(local_buf as *mut libc::c_void, buf_size);
+                ffi::ibv_destroy_cq(cq);
+                ffi::ibv_dealloc_pd(pd);
+                ffi::rdma_destroy_id(cm_id);
+                ffi::rdma_destroy_event_channel(ec);
+                bail!("Server did not send RDMA handshake (private_data_len={})", plen);
+            }
+            std::ptr::read_unaligned(pdata as *const RdmaHandshake)
+        };
         unsafe { ffi::rdma_ack_cm_event(event) };
 
-        tracing::info!(addr = %self.addr, "RDMA connection established");
-
-        // For now, use a simple protocol: the remote side sends its rkey/addr/size
-        // via a separate TCP channel. This is a placeholder — in production,
-        // we'd exchange this via RDMA CM private data.
-        // TODO: exchange rkey/addr via RDMA CM private data
-        let remote_addr = 0u64; // placeholder
-        let remote_rkey = 0u32; // placeholder
-        let remote_size = self.max_pages as u64 * PAGE_SIZE as u64;
+        tracing::info!(
+            addr = %self.addr,
+            remote_rkey = handshake.rkey,
+            remote_addr = handshake.addr,
+            remote_size = handshake.size,
+            "RDMA connection established"
+        );
 
         *self.state.lock() = Some(RdmaState {
             event_channel: ec,
@@ -427,9 +453,9 @@ impl DuvmBackend for RdmaBackend {
             local_mr: mr,
             local_buf,
             local_buf_size: buf_size,
-            remote_addr,
-            remote_rkey,
-            remote_size,
+            remote_addr: handshake.addr,
+            remote_rkey: handshake.rkey,
+            remote_size: handshake.size,
         });
 
         Ok(())
