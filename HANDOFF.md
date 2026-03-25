@@ -24,10 +24,14 @@
 | Test | Checks | What it proves |
 |---|---|---|
 | `cargo test` | 189 pass | User-space engine, policy, backends, config, transport modes |
-| `test-rdma-qemu.sh` | 18/18 | **Full RDMA: SoftiWARP, CM handshake, one-sided WRITE/READ, data integrity** |
 | `test-kmod-qemu.sh` | 16/16 | Kernel module: load, block I/O, swap, unload |
 | `test-kmod-daemon-qemu.sh` | 10/10 | Ring buffer: kmod → daemon → engine → backend |
 | `test-distributed-qemu.sh` | 12/12 | Two VMs: kmod+daemon on A, memserver on B, network I/O |
+| `test-mutual-oom-qemu.sh` | 9/9 | Two VMs: mutual OOM degradation, graceful fallback |
+| `test-3machine-qemu.sh` | 10/10 | Three VMs: fair distribution across peers, exhaustion handling |
+| `test-rdma-qemu.sh` | 18/18 | **Full RDMA: SoftiWARP, CM handshake, one-sided WRITE/READ, data integrity** |
+
+All QEMU tests run in CI (`e2e-kmod` job on `ubuntu-24.04-arm`).
 
 ### Components
 
@@ -83,7 +87,6 @@ sudo bash scripts/setup-kmod-for-testing.sh --teardown  # Cleanup
 
 1. **Real RDMA hardware test** — run on DGX Spark's ConnectX-7 (RoCEv2), measure latency vs TCP
 2. **Enable/disable service** — systemd units, `duvm-ctl enable`/`duvm-ctl disable` across cluster
-3. **CI** — add `test-rdma-qemu.sh` to GitHub Actions workflow
 
 ## Key Technical Decisions
 
