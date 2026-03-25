@@ -80,23 +80,25 @@ sudo bash scripts/setup-kmod-for-testing.sh --teardown  # Cleanup
 
 ## What's Next
 
-1. **Real hardware test** — run `sudo bash scripts/setup-kmod-for-testing.sh` on calc1, connect daemon to calc2's memserver, verify pages swap to remote RAM
-2. **RDMA backend** — libibverbs for 50-100x throughput improvement over TCP (2us vs 200us per page)
-3. **Enable/disable service** — systemd units, `duvm-ctl enable`/`duvm-ctl disable` across cluster
-4. **x86 support** — kernel module should compile as-is, needs verification in x86 QEMU
-5. **Multi-node cluster** — extend from 2 nodes to N nodes with peer discovery
+1. **3-machine QEMU test** — three VMs with multicast networking, testing fair round-robin distribution, exhaustion cascading, crash recovery. QEMU multicast verified working.
+2. **RDMA backend** — new `duvm-backend-rdma` crate using libibverbs. Auto-detect at startup, SoftRoCE for CI.
+3. **Real hardware test** — run `sudo bash scripts/setup-kmod-for-testing.sh` on calc1, connect daemon to calc2's memserver
+4. **Enable/disable service** — systemd units, `duvm-ctl enable`/`duvm-ctl disable` across cluster
 
 ## Key Technical Decisions
 
-See `DECISIONS.md` for full rationale. See `research/` for prior art surveys.
+See `DECISIONS.md` for full rationale. See `research/` for prior art surveys. See `docs/ARCHITECTURE.md` for full page lifecycle.
 
 | Decision | Choice | Why |
 |---|---|---|
 | Swap interception | Virtual block device (not frontswap) | frontswap removed in Linux 6.17; block device uses stable blk-mq API |
 | Kmod↔daemon | Shared ring buffer via mmap of /dev/duvm_ctl | Low latency, zero-copy staging area for page data |
+| Daemon wake-up | poll() on /dev/duvm_ctl (event-driven, ~1-5us) | No polling loop, instant response to kernel requests |
 | Architecture | Symmetric — every node is compute + memory | All nodes equal; no single point of failure |
 | Transport | TCP default, RDMA optional (auto-detect) | TCP works everywhere; RDMA for production performance |
+| Multi-peer | Round-robin across peers in same tier | Fair distribution; config: `peers = [...]` |
 | Policy | LRU with tier-aware cascading + eviction | Prefers lowest-latency tier; evicts cold pages when full |
+| Mutual OOM | Memserver refuses when full → I/O error → kernel tries next swap device | No deadlock, no recursion |
 | GPU UVM | Hardware ATS on DGX Spark; HMM on PCIe GPUs | No GPU-specific code needed — swap layer is below GPU driver |
 | OOM safety | Linux swap priority cascade | `swapon -p 100` for remote, `-p 10` for local SSD fallback |
 | Testing | QEMU VMs for kernel module safety | Crashes don't affect host; no special hardware needed |
