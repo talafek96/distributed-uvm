@@ -338,3 +338,36 @@ A kernel: "I need to swap page 1000"
 **The key design rule:** receiving a remote page must never trigger the receiver's swap path. The memserver checks its capacity limit **before** allocating. If it would exceed `max_pages`, it returns an error immediately — no `Box::new()`, no heap allocation, no chance of triggering swap.
 
 For production use, the RDMA backend would use one-sided RDMA with registered memory regions, making page loss on remote failure detectable. Future work includes page replication across multiple remotes for fault tolerance.
+
+---
+
+## Fair Distribution: How Pages Balance Across the Cluster
+
+### The algorithm: least-loaded selection
+
+When the daemon needs to store a page on a remote peer, it picks the peer with the **lowest utilization** (used pages / total capacity). This ensures:
+
+- **Balanced by percentage, not count.** A peer with 10/1000 pages (1%) gets priority over one with 5/100 (5%), even though it has more pages. What matters is how much room is left.
+- **Adapts to heterogeneous clusters.** If machine B has 64GB dedicated to memserver and machine C has 8GB, pages naturally flow to B until utilization percentages equalize.
+- **Self-balancing.** As a peer fills up, its utilization rises and traffic shifts to emptier peers. No manual tuning.
+- **Tie-breaking.** When two peers have identical utilization (common when both are empty), round-robin breaks the tie so neither is favored.
+
+### Example: 3 peers with different capacities
+
+```
+Machine B: 2/1000 pages (0.2% used)
+Machine C: 1/100 pages  (1.0% used)
+Machine D: 0/500 pages  (0.0% used)
+
+Next page goes to: D (lowest utilization: 0%)
+After: D has 1/500 (0.2%), B has 2/1000 (0.2%) — tied
+Next page: round-robin between B and D
+```
+
+### What about read-back?
+
+Reads don't need balancing — the policy engine tracks exactly which peer has each page (offset → backend_id mapping). When the kernel reads a page back, the daemon looks up where it was stored and fetches from that specific peer.
+
+### What about rebalancing?
+
+Currently there's no rebalancing of existing pages. If a new peer joins the cluster with empty capacity, new pages go there (least-loaded), but old pages stay where they are. Rebalancing (migrating pages between peers) is planned as a future optimization.
