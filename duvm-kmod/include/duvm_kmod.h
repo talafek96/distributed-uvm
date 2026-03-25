@@ -81,7 +81,8 @@ struct duvm_ring {
     unsigned int             nr_ring_pages;
     size_t                   ring_size;     /* total size in bytes */
     atomic_t                 seq_counter;
-    wait_queue_head_t        comp_wait;     /* wait for completions */
+    wait_queue_head_t        comp_wait;     /* kernel waits here for completions */
+    wait_queue_head_t        req_wait;      /* daemon waits here for new requests (poll) */
     bool                     daemon_connected;
 };
 

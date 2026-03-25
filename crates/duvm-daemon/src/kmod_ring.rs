@@ -268,25 +268,36 @@ impl KmodRingConsumer {
         true
     }
 
-    /// Run the consumer loop: poll for requests and process them.
+    /// Run the consumer loop using poll() on /dev/duvm_ctl for instant wake-up.
+    ///
+    /// The kernel module implements poll() on /dev/duvm_ctl that returns POLLIN
+    /// when there are pending requests. This means the daemon wakes up within
+    /// ~1-5us of a new request, instead of the old 0-100us polling delay.
+    ///
     /// Blocks until `stop` is set to true.
     pub fn run_loop(&self, engine: &Engine, stop: &Arc<AtomicBool>) {
-        tracing::info!("kmod ring consumer started");
-        let mut idle_spins = 0u32;
+        tracing::info!("kmod ring consumer started (event-driven via poll)");
+
+        let fd = self._file.as_raw_fd();
 
         while !stop.load(Ordering::Relaxed) {
-            if self.poll_once(engine) {
-                idle_spins = 0;
-            } else {
-                idle_spins += 1;
-                if idle_spins > 1000 {
-                    // After 1000 idle spins, sleep briefly to avoid burning CPU
-                    std::thread::sleep(std::time::Duration::from_micros(100));
-                    idle_spins = 1000; // cap to avoid overflow
-                } else {
-                    std::hint::spin_loop();
-                }
+            // Process all pending requests first (drain the ring)
+            while self.poll_once(engine) {
+                // Keep processing — more requests may have arrived
             }
+
+            // No more pending requests. Block on poll() until kernel wakes us.
+            // Timeout of 100ms so we can check the stop flag periodically.
+            let mut pollfd = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+
+            unsafe {
+                libc::poll(&mut pollfd, 1, 100); // 100ms timeout
+            }
+            // poll returned — either POLLIN (new request) or timeout (check stop flag)
         }
 
         tracing::info!("kmod ring consumer stopped");

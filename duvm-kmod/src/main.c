@@ -29,6 +29,7 @@
 #include <linux/vmalloc.h>
 #include <linux/miscdevice.h>
 #include <linux/fs.h>
+#include <linux/poll.h>
 
 #include "duvm_kmod.h"
 
@@ -108,7 +109,7 @@ static blk_status_t duvm_queue_rq(struct blk_mq_hw_ctx *hctx,
             req.staging_slot = staging_slot;
 
             ret = duvm_ring_submit_and_wait(&duvm_dev.ring, &req,
-                                             &comp, 5000);
+                                             &comp, 500);
             if (ret) {
                 /* Ring buffer failed — fall through to xarray fallback */
                 pr_warn_ratelimited("duvm: ring submit failed (%d), using local fallback\n", ret);
@@ -270,11 +271,32 @@ static int duvm_ctl_mmap(struct file *filp, struct vm_area_struct *vma)
     return 0;
 }
 
+/*
+ * poll() on /dev/duvm_ctl: returns POLLIN when there are pending requests.
+ * The daemon uses epoll/poll on this fd instead of busy-polling the ring.
+ * This eliminates the 0-100us polling latency — daemon wakes instantly.
+ */
+static __poll_t duvm_ctl_poll(struct file *filp, poll_table *wait)
+{
+    __poll_t mask = 0;
+
+    poll_wait(filp, &duvm_dev.ring.req_wait, wait);
+
+    /* Check if there are pending requests */
+    if (READ_ONCE(duvm_dev.ring.header->req_write_idx) !=
+        READ_ONCE(duvm_dev.ring.header->req_read_idx)) {
+        mask |= EPOLLIN | EPOLLRDNORM;
+    }
+
+    return mask;
+}
+
 static const struct file_operations duvm_ctl_fops = {
     .owner   = THIS_MODULE,
     .open    = duvm_ctl_open,
     .release = duvm_ctl_release,
     .mmap    = duvm_ctl_mmap,
+    .poll    = duvm_ctl_poll,
 };
 
 /*

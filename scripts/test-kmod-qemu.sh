@@ -377,8 +377,10 @@ echo "[4/5] Booting QEMU VM..."
 
 # Detect KVM availability
 ACCEL="tcg"
+CPU="cortex-a72"
 if [[ -r /dev/kvm ]] && [[ -w /dev/kvm ]]; then
     ACCEL="kvm"
+    CPU="host"
     echo "  Using KVM acceleration"
 else
     echo "  Using TCG (software emulation) — no KVM access"
@@ -395,7 +397,7 @@ SERIAL_LOG="$WORKDIR/serial.log"
 #   - Auto-poweroff on exit
 timeout "$TIMEOUT" qemu-system-aarch64 \
     -machine virt \
-    -cpu cortex-a72 \
+    -cpu "$CPU" \
     -accel "$ACCEL" \
     -m 512 \
     -kernel "$KERNEL" \

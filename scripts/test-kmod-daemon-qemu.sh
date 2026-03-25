@@ -213,13 +213,17 @@ echo "  OK ($(du -h "$WORKDIR/initramfs.cpio.gz" | cut -f1))"
 # ── Boot QEMU ──
 echo "[4/4] Booting QEMU VM..."
 ACCEL="tcg"
-[[ -r /dev/kvm ]] && [[ -w /dev/kvm ]] && ACCEL="kvm"
+CPU="cortex-a72"
+if [[ -r /dev/kvm ]] && [[ -w /dev/kvm ]]; then
+    ACCEL="kvm"
+    CPU="host"
+fi
 echo "  Accelerator: $ACCEL"
 
 SERIAL_LOG="$WORKDIR/serial.log"
 timeout "$TIMEOUT" qemu-system-aarch64 \
     -machine virt \
-    -cpu cortex-a72 \
+    -cpu "$CPU" \
     -accel "$ACCEL" \
     -m 512 \
     -kernel "$KERNEL" \

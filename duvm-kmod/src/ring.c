@@ -83,6 +83,7 @@ int duvm_ring_init(struct duvm_ring *ring, unsigned int capacity,
 
     atomic_set(&ring->seq_counter, 0);
     init_waitqueue_head(&ring->comp_wait);
+    init_waitqueue_head(&ring->req_wait);
     ring->daemon_connected = false;
 
     pr_info("duvm: ring buffer initialized (%u pages, %zu bytes)\n",
@@ -159,6 +160,9 @@ int duvm_ring_submit_and_wait(struct duvm_ring *ring,
     /* Barrier: ensure request data visible before updating index */
     smp_wmb();
     WRITE_ONCE(ring->header->req_write_idx, next_write);
+
+    /* Wake daemon immediately (it may be blocked in poll/epoll on /dev/duvm_ctl) */
+    wake_up(&ring->req_wait);
 
     /* Wait for matching completion */
     timeout_jiffies = msecs_to_jiffies(timeout_ms);

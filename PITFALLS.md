@@ -1,18 +1,19 @@
 # Pitfalls
 
-## Daemon polling adds 0-100us latency
+## ~~Daemon polling adds 0-100us latency~~ FIXED
 
-**Symptom:** Page fault latency has a variable 0-100us component from the daemon's polling loop.
-**Cause:** `kmod_ring.rs` `run_loop()` spins 1000 times then sleeps 100us. If a request arrives right after the daemon goes to sleep, it waits up to 100us.
-**Fix needed:** Replace polling with eventfd notification. Kernel writes to eventfd after posting ring request. Daemon blocks on epoll/io_uring waiting for eventfd. Expected wake-up latency: 1-5us.
-**Tracking:** Performance-critical. Must fix before production use.
+**Symptom:** Page fault latency had a variable 0-100us component from the daemon's polling loop.
+**Cause:** `kmod_ring.rs` `run_loop()` spun 1000 times then slept 100us.
+**Fix:** Implemented `poll()` file operation on `/dev/duvm_ctl`. Kernel calls `wake_up(&ring->req_wait)` after posting a request. Daemon blocks on `poll()` waiting for POLLIN. Wake-up latency is now ~1-5us.
+**Commit:** Current session.
 
-## Kernel ring timeout is 5 seconds
+## ~~Kernel ring timeout is 5 seconds~~ FIXED
 
-**Symptom:** If daemon is slow or dead, kernel thread waits up to 5 seconds before falling back to xarray.
-**Cause:** `ring.c` `duvm_ring_submit_and_wait()` uses `wait_event_timeout(ring->comp_wait, ..., msecs_to_jiffies(5000))`.
-**Clarification:** `wait_event_timeout` does NOT freeze the kernel. It puts the calling thread to sleep on a wait queue. Other processes, interrupts, and the scheduler continue running normally. But 5 seconds is too generous — should be 500ms or less.
-**Fix needed:** Reduce timeout. Consider adaptive timeout based on measured daemon response time.
+**Symptom:** If daemon is slow or dead, kernel thread waited up to 5 seconds before fallback.
+**Cause:** `ring.c` used `msecs_to_jiffies(5000)`.
+**Clarification:** `wait_event_timeout` does NOT freeze the kernel — it sleeps the calling thread while the scheduler continues.
+**Fix:** Reduced to 500ms. The daemon now responds in microseconds via poll() wake-up, so 500ms is only hit if the daemon is dead.
+**Commit:** Current session.
 
 ## QEMU KVM requires -cpu host, not cortex-a72
 
