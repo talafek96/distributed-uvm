@@ -2,102 +2,101 @@
 
 ## What This Is
 
-**duvm** (Distributed Unified Virtual Memory) — middleware that makes remote and heterogeneous memory transparently available to unmodified applications. Sits between applications and pluggable memory backends (RDMA, CXL, NVLink, compressed local).
+**duvm** (Distributed Unified Virtual Memory) — a service that pools RAM across a cluster of machines, making remote memory transparently available to unmodified applications. CPU and GPU workloads both benefit. Can be enabled/disabled at runtime.
 
 ## Current State
 
-**Phase: Implementation — core framework complete, all bugs fixed, comprehensive testing done, LRU eviction working**
+**Phase: Core complete. Kernel→daemon→backend path proven in QEMU. Ready for real hardware testing.**
 
 ### What Works (Proven)
 
 | What | Evidence | Command |
 |---|---|---|
-| Engine data path (store/load/invalidate) | 500 pages through LZ4 backend, byte-perfect | `make demo` |
-| LRU policy with tier cascading | Prefers low-latency, cascades when full, skips unhealthy | `cargo run --example demo_proof --release -p duvm-daemon` |
-| LRU eviction under memory pressure | Hot pages survive, cold pages evicted, new stores succeed | `cargo run --example demo_proof --release -p duvm-daemon` |
-| Double-store handle leak fixed | Re-storing at same offset frees old page, capacity stays correct | `cargo run --example demo_proof --release -p duvm-daemon` |
-| Config validation | Rejects max_pages=0, unknown strategy; CLI --socket override works | `cargo run --example demo_proof --release -p duvm-daemon` |
-| Multi-backend cascading | Compress full → falls back to memory | `cargo run --example demo_proof --release -p duvm-daemon` |
-| Cross-machine memory (calc1 ↔ calc2) | 10,000 pages over ConnectX-7, byte-perfect | `cargo run --example demo_distributed --release -p duvm-daemon` |
-| Transparent page fault handling | 256 pages via userfaultfd, 22us/fault, zero errors | `cargo run --example demo_uffd --release -p duvm-daemon` |
-| TCP remote memory backend | 100 pages round-tripped via TCP, all freed | `cargo run --example demo_proof --release -p duvm-daemon` |
-| Daemon socket IPC | ping, status, backends, stats — all verified, JSON-safe | `cargo run --example demo_proof --release -p duvm-daemon` |
-| Concurrent operations | 8 threads × 100 pages, thread-safe | `cargo run --example demo_proof --release -p duvm-daemon` |
-| C FFI | 100 pages round-tripped from C program | `make demo-c` |
-| Kernel module | Compiles as virtual block device for Linux 6.17 | `make kmod` |
-| Test suite | 165 tests passing (unit + integration + comprehensive) | `cargo test` |
-| Code quality | clippy -D warnings clean, rustfmt clean | `cargo clippy --all-targets -- -D warnings` |
-| End-to-end proof | 12/12 subsystems verified in single demo | `cargo run --example demo_proof --release -p duvm-daemon` |
+| Kernel module ↔ daemon ring buffer | Pages flow kmod → ring → daemon → backend, 10/10 QEMU | `bash scripts/test-kmod-daemon-qemu.sh` |
+| Two-VM distributed test | VM-A (kmod+daemon) talks to VM-B (memserver), 12/12 | `bash scripts/test-distributed-qemu.sh` |
+| Kernel module standalone | insmod, mkswap, swapon, block I/O, rmmod — 16/16 QEMU | `bash scripts/test-kmod-qemu.sh` |
+| Cross-machine TCP (real hardware) | 10,000 pages calc1↔calc2 over ConnectX-7, byte-perfect | `cargo run --example demo_distributed --release -p duvm-daemon` |
+| Engine + policy + eviction | LRU, tier cascading, capacity overflow, 178 Rust tests | `cargo test` |
+| End-to-end proof demo | 12 subsystems verified | `cargo run --example demo_proof --release -p duvm-daemon` |
+
+### Test Summary
+
+| Test | Checks | What it proves |
+|---|---|---|
+| `cargo test` | 178 pass | User-space engine, policy, backends, config |
+| `test-kmod-qemu.sh` | 16/16 | Kernel module: load, block I/O, swap, unload |
+| `test-kmod-daemon-qemu.sh` | 10/10 | Ring buffer: kmod → daemon → engine → backend |
+| `test-distributed-qemu.sh` | 12/12 | Two VMs: kmod+daemon on A, memserver on B, network I/O |
+| `demo_distributed` | 10K pages | Real calc1→calc2 TCP over ConnectX-7 |
+| `demo_proof` | 12/12 | All subsystems in one run |
 
 ### Components
 
 | Component | Status | Location |
 |---|---|---|
+| **duvm-kmod** | Complete + tested | `duvm-kmod/` — Virtual block device, ring buffer, xarray fallback |
+| **duvm-daemon** | Complete + tested | `crates/duvm-daemon/` — Engine, policy, ring consumer, control socket |
+| **duvm-memserver** | Complete + tested | `crates/duvm-memserver/` — Remote memory server |
 | **duvm-common** | Complete | `crates/duvm-common/` — PageHandle, ring buffer, protocol, stats |
 | **duvm-backend-trait** | Complete | `crates/duvm-backend-trait/` — Backend plugin interface |
-| **duvm-backend-memory** | Complete | `crates/duvm-backend-memory/` — In-memory reference backend |
+| **duvm-backend-memory** | Complete | `crates/duvm-backend-memory/` — In-memory backend |
 | **duvm-backend-compress** | Complete | `crates/duvm-backend-compress/` — LZ4 compression backend |
 | **duvm-backend-tcp** | Complete | `crates/duvm-backend-tcp/` — TCP remote memory backend |
-| **duvm-daemon** | Complete | `crates/duvm-daemon/` — Policy, backends, control socket, uffd |
-| **duvm-ctl** | Complete | `crates/duvm-ctl/` — CLI tool (status, stats, backends, ping) |
-| **duvm-memserver** | Complete | `crates/duvm-memserver/` — Remote memory server binary |
-| **libduvm** | Complete | `crates/libduvm/` — Rust API + C FFI |
-| **duvm-kmod** | Compiles | `duvm-kmod/` — Virtual block device swap target |
+| **duvm-ctl** | Complete | `crates/duvm-ctl/` — CLI tool |
+| **libduvm** | Complete | `crates/libduvm/` — Rust + C FFI library |
 
-### Hardware Tested On
+### Hardware
 
-- 2x NVIDIA DGX Spark (128GB unified LPDDR5X each)
-- 4x ConnectX-7 200Gbps RoCE direct cables
+- 2x NVIDIA DGX Spark (GB10 Blackwell, 128GB unified LPDDR5X each)
+- 4x ConnectX-7 200Gbps RoCE (calc1: 192.168.200.10, calc2: 192.168.200.11)
 - aarch64, Linux 6.17.0-1008-nvidia, CUDA 13.0
+- GPU UVM via ATS (hardware — no special code needed)
 
 ## How to Build and Test
 
 ```bash
-make build          # Build all Rust crates
-make test           # Run all 165 tests
-make check          # Format + lint + test
-make kmod           # Build kernel module
-make demo           # Engine demo
-make demo-c         # C FFI demo
-make bench          # Performance benchmarks
-bash scripts/preflight.sh  # Verify all prerequisites
+# Build everything
+cargo build --release
+make -C duvm-kmod
 
-# End-to-end proof demo (exercises all 10 subsystems):
-cargo run --example demo_proof --release -p duvm-daemon
-```
+# Run Rust tests (178 tests, no sudo needed)
+cargo test
 
-## Prerequisites
+# QEMU tests (no sudo needed)
+bash scripts/test-kmod-qemu.sh            # Kernel module standalone
+bash scripts/test-kmod-daemon-qemu.sh      # Kmod + daemon ring buffer
+bash scripts/test-distributed-qemu.sh      # Two VMs: distributed memory
 
-```bash
-# Required on compute nodes (where apps run):
-sudo sysctl -w vm.unprivileged_userfaultfd=1
-echo "vm.unprivileged_userfaultfd=1" | sudo tee /etc/sysctl.d/90-duvm.conf
+# Cross-machine TCP test (no sudo, needs calc2 reachable)
+# Terminal 1: ssh calc2-104004, start memserver
+# Terminal 2: cargo run --example demo_distributed --release -p duvm-daemon
 
-# Required for kernel module (optional, for best performance):
-sudo apt install linux-headers-$(uname -r)
-
-# Required for QEMU testing (optional, for safe kmod development):
-sudo apt install qemu-system-arm qemu-utils
+# Real hardware test (needs sudo for insmod):
+sudo bash scripts/setup-kmod-for-testing.sh        # Load kmod, set permissions
+cargo run --release -p duvm-daemon -- --kmod-ctl /dev/duvm_ctl  # Start daemon
+sudo swapon -p 100 /dev/duvm_swap0                 # Activate swap
+sudo bash scripts/setup-kmod-for-testing.sh --teardown  # Cleanup
 ```
 
 ## What's Next
 
-Remaining for production:
-- [ ] Wire userfaultfd handler to TCP backend (currently uses local pattern fill)
-- [ ] Kernel module: test insmod + mkswap + swapon in QEMU VM
-- [ ] Symmetric deployment: every node runs daemon + memserver
-- [ ] Install script hardening and testing
-- [ ] RDMA backend (libibverbs, bypasses TCP for 200Gbps wire-rate)
+1. **Real hardware test** — run `sudo bash scripts/setup-kmod-for-testing.sh` on calc1, connect daemon to calc2's memserver, verify pages swap to remote RAM
+2. **RDMA backend** — libibverbs for 50-100x throughput improvement over TCP (2us vs 200us per page)
+3. **Enable/disable service** — systemd units, `duvm-ctl enable`/`duvm-ctl disable` across cluster
+4. **x86 support** — kernel module should compile as-is, needs verification in x86 QEMU
+5. **Multi-node cluster** — extend from 2 nodes to N nodes with peer discovery
 
 ## Key Technical Decisions
 
-See `DECISIONS.md` for comprehensive rationale and `research/decisions.md` for historical context.
+See `DECISIONS.md` for full rationale. See `research/` for prior art surveys.
 
 | Decision | Choice | Why |
 |---|---|---|
 | Swap interception | Virtual block device (not frontswap) | frontswap removed in Linux 6.17; block device uses stable blk-mq API |
-| Architecture | Symmetric — every node is compute + memory | User requirement: all nodes equal |
-| Policy engine | LRU with tier-aware cascading | Prefers lowest-latency tier; cascades when full; skips unhealthy backends |
-| Fallback mode | userfaultfd (C helper for aarch64 ABI) | Works without kernel module; proven at 22us/fault |
-| Development safety | QEMU/KVM for kernel module testing | Crashes don't affect host |
-| Kernel module dev | calc2 for hardware integration testing | Two identical machines available |
+| Kmod↔daemon | Shared ring buffer via mmap of /dev/duvm_ctl | Low latency, zero-copy staging area for page data |
+| Architecture | Symmetric — every node is compute + memory | All nodes equal; no single point of failure |
+| Transport | TCP default, RDMA optional (auto-detect) | TCP works everywhere; RDMA for production performance |
+| Policy | LRU with tier-aware cascading + eviction | Prefers lowest-latency tier; evicts cold pages when full |
+| GPU UVM | Hardware ATS on DGX Spark; HMM on PCIe GPUs | No GPU-specific code needed — swap layer is below GPU driver |
+| OOM safety | Linux swap priority cascade | `swapon -p 100` for remote, `-p 10` for local SSD fallback |
+| Testing | QEMU VMs for kernel module safety | Crashes don't affect host; no special hardware needed |
