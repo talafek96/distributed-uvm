@@ -196,6 +196,7 @@ impl DuvmBackend for RdmaBackend {
         let ret =
             unsafe { ffi::rdma_create_id(ec, &mut cm_id, std::ptr::null_mut(), ffi::RDMA_PS_TCP) };
         if ret != 0 {
+            unsafe { ffi::rdma_destroy_event_channel(ec) };
             bail!("rdma_create_id failed: {}", ret);
         }
 

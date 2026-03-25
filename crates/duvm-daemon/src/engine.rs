@@ -98,6 +98,8 @@ impl Engine {
             };
 
             for addr in &remote_cfg.peers {
+                let mut tcp_fallback_created = false;
+
                 if use_rdma {
                     let mut backend = RdmaBackend::new(next_id, addr);
                     match backend.init(&BackendConfig {
@@ -122,6 +124,7 @@ impl Engine {
                                         tracing::info!(id = next_id, addr, transport = "tcp", "Fell back to TCP after RDMA failure");
                                         backends.insert(next_id, Box::new(tcp_backend));
                                         next_id += 1;
+                                        tcp_fallback_created = true;
                                     }
                                     Err(e2) => {
                                         tracing::warn!(addr, error = %e2, "TCP fallback also failed — skipping peer");
@@ -132,7 +135,7 @@ impl Engine {
                     }
                 }
 
-                if use_tcp {
+                if use_tcp && !tcp_fallback_created {
                     let mut backend = TcpBackend::new(next_id, addr);
                     match backend.init(&BackendConfig {
                         max_pages: remote_cfg.max_pages_per_peer,
