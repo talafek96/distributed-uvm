@@ -88,3 +88,32 @@
 **Fix:** Use `cc` to compile a size-check program against actual headers. Verified: `ibv_send_wr`=128, `ibv_wc`=48, `ibv_mr`=48, `rdma_cm_id`=416, `ibv_qp`=168. Set `_pad` arrays to match exact C sizes. Fields we access (`wr.rdma.remote_addr` at offset 40, `wr.rdma.rkey` at 48, `mr.lkey` at 36, `cm_id.verbs` at 0, `cm_id.qp` at 24) are all verified correct.
 **Rule:** Always run `offsetof()` checks against system headers before trusting hand-written FFI bindings.
 **Commit:** a9ddad4
+
+## RDMA CM event constants had wrong values
+
+**Symptom:** `rdma_resolve_route` succeeded (event=2) but code rejected it because `RDMA_CM_EVENT_ROUTE_RESOLVED` was defined as 1.
+**Cause:** The C enum has `ADDR_ERROR=1` between `ADDR_RESOLVED=0` and `ROUTE_RESOLVED=2`. Our FFI had `ROUTE_RESOLVED=1`.
+**Fix:** Verified all enum values against the header: ADDR_RESOLVED=0, ADDR_ERROR=1, ROUTE_RESOLVED=2, ROUTE_ERROR=3, CONNECT_REQUEST=4, ..., ESTABLISHED=9.
+**Rule:** Never assume enum values. Always verify with a C test program.
+**Commit:** b064cba
+
+## SoftRoCE (rxe) doesn't work over QEMU socket networking
+
+**Symptom:** `rdma_connect` times out between two QEMU VMs with SoftRoCE.
+**Cause:** SoftRoCE uses UDP port 4791 for RoCEv2 encapsulation. QEMU's `-netdev socket` passes Ethernet frames but the UDP tunnel packets from the rxe driver don't traverse correctly.
+**Fix:** Use SoftiWARP (siw) instead — it uses TCP for RDMA transport, which works fine over QEMU socket networking. Both rxe and siw need explicit device creation on modern kernels: `rdma link add siw0 type siw netdev eth0`.
+**Commit:** b064cba
+
+## iWARP RDMA listener conflicts with TCP on same port
+
+**Symptom:** `rdma_listen failed: -1` when memserver's RDMA listener uses the same port as TCP listener.
+**Cause:** SoftiWARP (iWARP) uses TCP as its transport. Both `TcpListener::bind(9200)` and `rdma_bind_addr(9200)` try to use the same TCP port.
+**Fix:** Use a separate port for RDMA (default: TCP port + 1). Added `--rdma-port` flag to memserver.
+**Commit:** b064cba
+
+## rdma_get_cm_event blocks forever without timeout
+
+**Symptom:** Daemon hangs during RDMA connection if server doesn't respond.
+**Cause:** `rdma_get_cm_event` is a blocking call with no timeout. If the RDMA server is down or unreachable, the daemon blocks indefinitely.
+**Fix:** Use `poll()` on the event channel fd (`ec->fd`) before calling `rdma_get_cm_event`. Added `wait_cm_event(ec, timeout_ms)` helper. Connect timeout = 10s, resolve timeouts = 5s.
+**Commit:** b064cba

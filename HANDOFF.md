@@ -6,31 +6,28 @@
 
 ## Current State
 
-**Phase: RDMA backend implemented. SoftRoCE verified in QEMU. Auto-fallback tested.**
+**Phase: RDMA end-to-end working. Pages flow via one-sided RDMA WRITE/READ. Verified in QEMU.**
 
 ### What Works (Proven)
 
 | What | Evidence | Command |
 |---|---|---|
+| RDMA end-to-end (SoftiWARP) | Two VMs: daemon → RDMA WRITE → memserver MR, 18/18 | `bash scripts/test-rdma-qemu.sh` |
 | Kernel module ↔ daemon ring buffer | Pages flow kmod → ring → daemon → backend, 10/10 QEMU | `bash scripts/test-kmod-daemon-qemu.sh` |
 | Two-VM distributed test | VM-A (kmod+daemon) talks to VM-B (memserver), 12/12 | `bash scripts/test-distributed-qemu.sh` |
 | Kernel module standalone | insmod, mkswap, swapon, block I/O, rmmod — 16/16 QEMU | `bash scripts/test-kmod-qemu.sh` |
 | Cross-machine TCP (real hardware) | 10,000 pages calc1↔calc2 over ConnectX-7, byte-perfect | `cargo run --example demo_distributed --release -p duvm-daemon` |
 | Engine + policy + eviction + transport | LRU, tier cascading, transport modes, 189 Rust tests | `cargo test` |
-| RDMA SoftRoCE + auto-fallback | SoftRoCE loads, ibv_devices finds rxe0, auto → TCP, 15/15 | `bash scripts/test-rdma-qemu.sh` |
-| End-to-end proof demo | 12 subsystems verified | `cargo run --example demo_proof --release -p duvm-daemon` |
 
 ### Test Summary
 
 | Test | Checks | What it proves |
 |---|---|---|
 | `cargo test` | 189 pass | User-space engine, policy, backends, config, transport modes |
+| `test-rdma-qemu.sh` | 18/18 | **Full RDMA: SoftiWARP, CM handshake, one-sided WRITE/READ, data integrity** |
 | `test-kmod-qemu.sh` | 16/16 | Kernel module: load, block I/O, swap, unload |
 | `test-kmod-daemon-qemu.sh` | 10/10 | Ring buffer: kmod → daemon → engine → backend |
 | `test-distributed-qemu.sh` | 12/12 | Two VMs: kmod+daemon on A, memserver on B, network I/O |
-| `test-rdma-qemu.sh` | 15/15 | SoftRoCE setup, ibv_devices, auto-fallback, data integrity |
-| `demo_distributed` | 10K pages | Real calc1→calc2 TCP over ConnectX-7 |
-| `demo_proof` | 12/12 | All subsystems in one run |
 
 ### Components
 
@@ -44,7 +41,7 @@
 | **duvm-backend-memory** | Complete | `crates/duvm-backend-memory/` — In-memory backend |
 | **duvm-backend-compress** | Complete | `crates/duvm-backend-compress/` — LZ4 compression backend |
 | **duvm-backend-tcp** | Complete | `crates/duvm-backend-tcp/` — TCP remote memory backend |
-| **duvm-backend-rdma** | Backend implemented, auto-fallback working | `crates/duvm-backend-rdma/` — RDMA (libibverbs + librdmacm) backend |
+| **duvm-backend-rdma** | Complete — end-to-end verified | `crates/duvm-backend-rdma/` — RDMA (libibverbs + librdmacm) backend + server |
 | **duvm-ctl** | Complete | `crates/duvm-ctl/` — CLI tool |
 | **libduvm** | Complete | `crates/libduvm/` — Rust + C FFI library |
 
@@ -84,10 +81,9 @@ sudo bash scripts/setup-kmod-for-testing.sh --teardown  # Cleanup
 
 ## What's Next
 
-1. **RDMA data path** — memserver needs RDMA listener mode (rdma_cm accept + register MR). Once done, pages flow via one-sided RDMA WRITE/READ (zero remote CPU). The rkey/addr exchange via RDMA CM private data is TODO in `RdmaBackend::init()`.
-2. **Real RDMA test** — test on DGX Spark's ConnectX-7 (RoCEv2), measure latency vs TCP
-3. **Enable/disable service** — systemd units, `duvm-ctl enable`/`duvm-ctl disable` across cluster
-4. **CI** — add `test-rdma-qemu.sh` to GitHub Actions workflow
+1. **Real RDMA hardware test** — run on DGX Spark's ConnectX-7 (RoCEv2), measure latency vs TCP
+2. **Enable/disable service** — systemd units, `duvm-ctl enable`/`duvm-ctl disable` across cluster
+3. **CI** — add `test-rdma-qemu.sh` to GitHub Actions workflow
 
 ## Key Technical Decisions
 
