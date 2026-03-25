@@ -83,7 +83,7 @@ ip link set eth0 up
 ip addr add 10.0.0.2/24 dev eth0
 sleep 1
 echo "VM-B: starting memserver with TINY capacity (5 pages)"
-/bin/duvm-memserver --bind 10.0.0.2:9200 --max-pages 5 --mlock false &
+/bin/duvm-memserver --bind 10.0.0.2:9200 --max-pages 5 &
 echo "VM_B_READY"
 wait
 INITB
