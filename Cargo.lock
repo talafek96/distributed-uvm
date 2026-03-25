@@ -272,6 +272,7 @@ dependencies = [
  "clap",
  "duvm-backend-trait",
  "duvm-common",
+ "nix",
  "serde",
  "serde_json",
  "tokio",

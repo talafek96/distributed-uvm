@@ -40,7 +40,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 clap = { version = "4", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 libc = "0.2"
-nix = { version = "0.29", features = ["mman", "signal", "fs", "ioctl"] }
+nix = { version = "0.29", features = ["mman", "signal", "fs", "ioctl", "user"] }
 lz4_flex = "0.11"
 crossbeam-utils = "0.8"
 parking_lot = "0.12"

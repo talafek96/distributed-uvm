@@ -1,0 +1,15 @@
+[Unit]
+Description=duvm - Load Kernel Module and Prepare Swap Device
+Before=duvm-daemon.service
+ConditionPathExists=/lib/modules/%v/extra/duvm-kmod.ko
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/sbin/modprobe duvm-kmod size_mb=4096
+ExecStart=/sbin/mkswap /dev/duvm_swap0
+ExecStop=/sbin/swapoff /dev/duvm_swap0
+ExecStop=/sbin/rmmod duvm_kmod
+
+[Install]
+WantedBy=multi-user.target

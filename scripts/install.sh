@@ -92,12 +92,15 @@ else
     echo "  /etc/duvm/duvm.toml already exists, skipping"
 fi
 
-# Step 5: Install systemd service
-echo "[5/6] Installing systemd service..."
+# Step 5: Install systemd services
+echo "[5/6] Installing systemd services..."
 install -m 644 config/duvm-daemon.service /etc/systemd/system/
+install -m 644 config/duvm-memserver.service /etc/systemd/system/
+install -m 644 config/duvm-kmod.service /etc/systemd/system/
 systemctl daemon-reload
-echo "  Installed: duvm-daemon.service"
-echo "  Start with: systemctl start duvm-daemon"
+echo "  Installed: duvm-daemon.service, duvm-memserver.service, duvm-kmod.service"
+echo "  Enable on boot: systemctl enable duvm-daemon duvm-memserver"
+echo "  Or use: duvm-ctl enable / duvm-ctl disable"
 
 # Step 6: Kernel module (optional)
 if $INSTALL_KMOD; then
@@ -122,8 +125,13 @@ echo
 echo "=== Installation complete ==="
 echo
 echo "Quick start:"
-echo "  duvm-daemon                    # Start daemon with defaults"
-echo "  duvm-ctl status                # Check daemon status"
+echo "  sudo duvm-ctl enable             # Load kmod, start services, activate swap"
+echo "  duvm-ctl status                   # Check daemon status"
+echo "  sudo duvm-ctl disable             # Drain pages, stop services, unload kmod"
+echo
+echo "Manual control:"
+echo "  systemctl start duvm-daemon       # Start daemon only"
+echo "  systemctl start duvm-memserver    # Start memserver only"
 echo "  duvm-memserver --bind 0.0.0.0:9200  # Start memory server for remote nodes"
 echo
 echo "For remote memory, start duvm-memserver on each remote node,"

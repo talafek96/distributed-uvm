@@ -1,0 +1,21 @@
+[Unit]
+Description=duvm - Remote Memory Server
+After=network.target
+Documentation=https://github.com/distributed-uvm/distributed-uvm
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/duvm-memserver --bind 0.0.0.0:9200 --max-pages 1000000
+Restart=on-failure
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=true
+ProtectHome=true
+
+# RDMA needs memlock for ibv_reg_mr
+LimitMEMLOCK=infinity
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
