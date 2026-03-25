@@ -303,11 +303,38 @@ sudo rmmod duvm_kmod             # device disappears
 
 | Failure | What happens | Data loss? |
 |---------|-------------|------------|
-| Daemon crashes | Kernel falls back to xarray (local storage) | No |
-| Memserver on machine B crashes | Daemon gets TCP error, falls back to local backends or other remotes | Pages on B are lost — kernel sees I/O error, OOM killer may activate |
-| Network cable pulled | TCP timeouts, kernel falls back to local | No (if local swap available) |
+| Daemon crashes | Kernel gets timeout, returns I/O error, kernel tries next swap device | No |
+| Memserver on machine B crashes | Daemon gets TCP error, returns error to kernel, kernel tries next swap device | Pages on B are lost — kernel sees I/O error, OOM killer may activate |
+| Network cable pulled | TCP timeouts, kernel falls back to next swap device | No (if local swap available) |
 | Machine B power failure | Same as memserver crash | Pages on B are lost |
 | `swapoff` on machine A | Kernel moves all pages back to local RAM | No |
 | `rmmod` without `swapoff` | Refused by kernel (device is busy) | No |
+| **All remotes full** | All memservers return ERR, daemon returns error, kernel module returns BLK_STS_IOERR, kernel uses next swap device (local SSD) | No |
+
+### Mutual OOM: Why It Can't Deadlock
+
+The scenario: Machine A is full, swaps to B. Machine B is also full.
+
+**What happens:**
+
+```
+A kernel: "I need to swap page 1000"
+  → A's kmod: writes to ring buffer
+  → A's daemon: engine.store_page() → TCP backend → B's memserver
+  → B's memserver: pool full → returns RESP_ERR
+  → A's daemon: store failed → returns error via ring completion (result=-1)
+  → A's kmod: comp.result != 0 → BLK_STS_IOERR
+  → A's kernel: "duvm_swap0 failed, try next swap device"
+  → A's kernel: writes to /swapfile (local SSD, priority 10)
+  → Success. No recursion.
+```
+
+**Why it can't loop:**
+1. The memserver **refuses** when full — it doesn't try to allocate and trigger its own swap
+2. The kernel module returns **I/O error** — it doesn't silently fall back to local kernel memory
+3. The kernel's swap priority system **automatically** tries the next device
+4. No component in the chain blocks waiting for the other machine
+
+**The key design rule:** receiving a remote page must never trigger the receiver's swap path. The memserver checks its capacity limit **before** allocating. If it would exceed `max_pages`, it returns an error immediately — no `Box::new()`, no heap allocation, no chance of triggering swap.
 
 For production use, the RDMA backend would use one-sided RDMA with registered memory regions, making page loss on remote failure detectable. Future work includes page replication across multiple remotes for fault tolerance.
