@@ -83,10 +83,57 @@ sudo swapon -p 100 /dev/duvm_swap0                 # Activate swap
 sudo bash scripts/setup-kmod-for-testing.sh --teardown  # Cleanup
 ```
 
+## Known Gaps
+
+### Bugs
+
+| Gap | Severity | Detail |
+|---|---|---|
+| RDMA server CQ leak on disconnect | Critical | `server.rs` creates a CQ per connection in `handle_connect()` but the DISCONNECTED handler only calls `rdma_destroy_id` — CQ is never freed. Long-running servers will exhaust RDMA resources. Fix: track CQs per conn_id, destroy on disconnect. |
+| `alloc_page()` TOCTOU race | Medium | `RdmaBackend::alloc_page()` does load-then-fetch_add without CAS. Two threads can both pass the capacity check and exceed `max_pages`. Same pattern exists in `TcpBackend` and memserver `alloc_offset()`. Fix: use `compare_exchange` loop. |
+| `rdma_cm_event` struct padding | Low | `_pad: [u8; 28]` at offset 44 gives 72 bytes, but real C struct is 80. Should be `[u8; 36]`. Harmless today (struct only accessed via pointer, field offsets correct) but the comment is wrong and a future refactor could break. |
+
+### Operational (blocking for production)
+
+| Gap | Severity | Detail |
+|---|---|---|
+| No enable/disable service | Critical | Product goal says "service that can be enabled and disabled across a cluster." No `duvm-ctl enable`/`disable` commands exist. `duvm-ctl` only has `status`, `stats`, `backends`, `ping`. No memserver systemd unit. |
+| No graceful drain | Important | No way to migrate remote pages back to local RAM before shutting down. `swapoff` works but is uncoordinated. Need `duvm-ctl drain` with progress reporting. |
+| Memserver is single-threaded | Important | TCP accept loop in `main.rs` calls `handle_client` synchronously. Only one client served at a time. Need `thread::spawn` per connection. |
+
+### Performance
+
+| Gap | Severity | Detail |
+|---|---|---|
+| Single-page RDMA buffer | Medium | RDMA backend uses one PAGE_SIZE local buffer under a Mutex. All transfers serialized. Need a buffer pool for concurrent RDMA ops. |
+| No real RDMA hardware validation | Important | Only tested with SoftiWARP in QEMU. Need ConnectX-7 RoCEv2 test on DGX Spark to validate latency and correctness. |
+
+### Testing
+
+| Gap | Severity | Detail |
+|---|---|---|
+| No RDMA failure path tests | Medium | No tests for connection timeout, rejection, address resolution failure, missing handshake. |
+| No backend reconnection | Medium | TCP backend doesn't clear broken connections or attempt reconnect. Daemon has no retry/circuit-breaker logic. |
+
 ## What's Next
 
-1. **Real RDMA hardware test** — run on DGX Spark's ConnectX-7 (RoCEv2), measure latency vs TCP
-2. **Enable/disable service** — systemd units, `duvm-ctl enable`/`duvm-ctl disable` across cluster
+### Phase 1 — Fix bugs (days)
+1. **Fix RDMA CQ leak** — track per-connection CQs, destroy on disconnect
+2. **Fix alloc_page TOCTOU** — CAS loop in RDMA, TCP, and memserver alloc paths
+3. **Fix rdma_cm_event padding** — `_pad: [u8; 36]`
+4. **Make memserver multi-threaded** — `thread::spawn` per TCP client
+
+### Phase 2 — Enable/disable service (week)
+5. **systemd units** — `duvm-daemon.service` + `duvm-memserver.service` + `duvm-kmod-load.service`
+6. **`duvm-ctl enable/disable`** — loads kmod, starts services, activates swap; reverse on disable
+7. **`duvm-ctl drain`** — migrate all remote pages back before shutdown
+8. **Cluster join/leave scripts** — single command to add/remove a node
+
+### Phase 3 — Production validation (week)
+9. **Real RDMA hardware test** — run on DGX Spark ConnectX-7, measure latency vs TCP
+10. **Backend reconnection** — TCP backend clears broken streams, daemon retries with backoff
+11. **Negative test suite** — RDMA timeouts, capacity exhaustion, backend failures
+12. **Prometheus metrics** — expose stats at `metrics_port` for monitoring
 
 ## Key Technical Decisions
 
