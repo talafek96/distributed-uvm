@@ -83,7 +83,7 @@ impl Engine {
                 "rdma" => true,
                 "tcp" => false,
                 "auto" => rdma_available,
-                "both" => rdma_available, // RDMA part; TCP added below
+                "both" => true, // always attempt RDMA in "both" mode
                 _ => {
                     tracing::warn!(transport, "unknown transport, defaulting to tcp");
                     false
@@ -111,8 +111,8 @@ impl Engine {
                         }
                         Err(e) => {
                             tracing::warn!(addr, error = %e, "RDMA backend failed");
-                            // If transport=auto and RDMA fails, fall through to TCP
-                            if transport == "auto" {
+                            // If transport=auto or both, fall through to TCP
+                            if matches!(transport, "auto" | "both") {
                                 let mut tcp_backend = TcpBackend::new(next_id, addr);
                                 match tcp_backend.init(&BackendConfig {
                                     max_pages: remote_cfg.max_pages_per_peer,

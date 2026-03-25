@@ -116,7 +116,7 @@ impl RdmaBackend {
             send_flags: ffi::IBV_SEND_SIGNALED,
             rdma_remote_addr: state.remote_addr + remote_offset,
             rdma_rkey: state.remote_rkey,
-            _pad: [0; 32],
+            _pad: [0; 76],
         };
 
         let mut bad_wr: *mut ffi::ibv_send_wr = std::ptr::null_mut();
@@ -134,8 +134,11 @@ impl RdmaBackend {
             opcode: 0,
             vendor_err: 0,
             byte_len: 0,
-            _pad: [0; 32],
+            _pad: [0; 24],
         };
+
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(5);
 
         loop {
             let n = unsafe { ffi::ibv_poll_cq(cq, 1, &mut wc) };
@@ -151,6 +154,13 @@ impl RdmaBackend {
             }
             if n < 0 {
                 bail!("ibv_poll_cq error");
+            }
+            if start.elapsed() > timeout {
+                bail!(
+                    "RDMA {} timed out after {:?}",
+                    if is_write { "WRITE" } else { "READ" },
+                    timeout
+                );
             }
             std::hint::spin_loop();
         }
@@ -265,12 +275,21 @@ impl DuvmBackend for RdmaBackend {
         // Allocate PD
         let pd = unsafe { ffi::ibv_alloc_pd((*cm_id).verbs) };
         if pd.is_null() {
+            unsafe {
+                ffi::rdma_destroy_id(cm_id);
+                ffi::rdma_destroy_event_channel(ec);
+            }
             bail!("ibv_alloc_pd failed");
         }
 
         // Create CQ
         let cq = unsafe { ffi::ibv_create_cq((*cm_id).verbs, 16, std::ptr::null_mut(), std::ptr::null_mut(), 0) };
         if cq.is_null() {
+            unsafe {
+                ffi::ibv_dealloc_pd(pd);
+                ffi::rdma_destroy_id(cm_id);
+                ffi::rdma_destroy_event_channel(ec);
+            }
             bail!("ibv_create_cq failed");
         }
 
@@ -287,6 +306,12 @@ impl DuvmBackend for RdmaBackend {
             )
         } as *mut u8;
         if local_buf.is_null() || local_buf as usize == usize::MAX {
+            unsafe {
+                ffi::ibv_destroy_cq(cq);
+                ffi::ibv_dealloc_pd(pd);
+                ffi::rdma_destroy_id(cm_id);
+                ffi::rdma_destroy_event_channel(ec);
+            }
             bail!("mmap for RDMA buffer failed");
         }
 
@@ -302,6 +327,13 @@ impl DuvmBackend for RdmaBackend {
             )
         };
         if mr.is_null() {
+            unsafe {
+                libc::munmap(local_buf as *mut libc::c_void, buf_size);
+                ffi::ibv_destroy_cq(cq);
+                ffi::ibv_dealloc_pd(pd);
+                ffi::rdma_destroy_id(cm_id);
+                ffi::rdma_destroy_event_channel(ec);
+            }
             bail!("ibv_reg_mr failed");
         }
 
@@ -324,6 +356,14 @@ impl DuvmBackend for RdmaBackend {
 
         let ret = unsafe { ffi::rdma_create_qp(cm_id, pd, &mut qp_attr) };
         if ret != 0 {
+            unsafe {
+                ffi::ibv_dereg_mr(mr);
+                libc::munmap(local_buf as *mut libc::c_void, buf_size);
+                ffi::ibv_destroy_cq(cq);
+                ffi::ibv_dealloc_pd(pd);
+                ffi::rdma_destroy_id(cm_id);
+                ffi::rdma_destroy_event_channel(ec);
+            }
             bail!("rdma_create_qp failed: {}", ret);
         }
 
@@ -335,6 +375,14 @@ impl DuvmBackend for RdmaBackend {
 
         let ret = unsafe { ffi::rdma_connect(cm_id, &mut conn_param) };
         if ret != 0 {
+            unsafe {
+                ffi::ibv_dereg_mr(mr);
+                libc::munmap(local_buf as *mut libc::c_void, buf_size);
+                ffi::ibv_destroy_cq(cq);
+                ffi::ibv_dealloc_pd(pd);
+                ffi::rdma_destroy_id(cm_id);
+                ffi::rdma_destroy_event_channel(ec);
+            }
             bail!("rdma_connect failed: {}", ret);
         }
 
@@ -349,6 +397,12 @@ impl DuvmBackend for RdmaBackend {
                 if !event.is_null() {
                     ffi::rdma_ack_cm_event(event);
                 }
+                ffi::ibv_dereg_mr(mr);
+                libc::munmap(local_buf as *mut libc::c_void, buf_size);
+                ffi::ibv_destroy_cq(cq);
+                ffi::ibv_dealloc_pd(pd);
+                ffi::rdma_destroy_id(cm_id);
+                ffi::rdma_destroy_event_channel(ec);
             }
             bail!("RDMA connection failed (event={})", ev);
         }

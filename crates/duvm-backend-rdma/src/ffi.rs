@@ -82,11 +82,12 @@ pub struct ibv_send_wr {
     pub num_sge: c_int,
     pub opcode: c_int,
     pub send_flags: c_int,
+    // (4 bytes implicit padding for u64 alignment — occupies imm_data slot)
     // RDMA-specific fields (union in C, we use the rdma variant)
     pub rdma_remote_addr: u64,
     pub rdma_rkey: u32,
-    // Padding for the rest of the union
-    pub(crate) _pad: [u8; 32],
+    // Pad to match C sizeof(ibv_send_wr) = 128 bytes. Offset here = 52.
+    pub(crate) _pad: [u8; 76],
 }
 
 #[repr(C)]
@@ -96,8 +97,8 @@ pub struct ibv_wc {
     pub opcode: c_int,
     pub vendor_err: u32,
     pub byte_len: u32,
-    // ... more fields
-    pub(crate) _pad: [u8; 32],
+    // Pad to match C sizeof(ibv_wc) = 48 bytes. Offset here = 24.
+    pub(crate) _pad: [u8; 24],
 }
 
 // ── rdma_cm types ──────────────────────────────────────────────────
