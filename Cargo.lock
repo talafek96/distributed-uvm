@@ -218,6 +218,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "duvm-backend-rdma"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cc",
+ "duvm-backend-trait",
+ "duvm-common",
+ "libc",
+ "parking_lot",
+ "toml 0.8.23",
+ "tracing",
+]
+
+[[package]]
 name = "duvm-backend-tcp"
 version = "0.1.0"
 dependencies = [
@@ -273,6 +287,7 @@ dependencies = [
  "clap",
  "duvm-backend-compress",
  "duvm-backend-memory",
+ "duvm-backend-rdma",
  "duvm-backend-tcp",
  "duvm-backend-trait",
  "duvm-common",

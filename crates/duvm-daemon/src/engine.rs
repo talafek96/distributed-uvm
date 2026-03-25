@@ -5,6 +5,7 @@ use crate::policy::{BackendCapacity, PolicyEngine, Strategy};
 use anyhow::Result;
 use duvm_backend_compress::CompressBackend;
 use duvm_backend_memory::MemoryBackend;
+use duvm_backend_rdma::RdmaBackend;
 use duvm_backend_tcp::TcpBackend;
 use duvm_backend_trait::{BackendConfig, BackendInfo, DuvmBackend};
 use duvm_common::page::{PageBuffer, PageHandle, Tier};
@@ -62,22 +63,89 @@ impl Engine {
         }
 
         // Initialize remote backends (one per peer)
+        // Transport modes:
+        //   "tcp"  — only TCP backends, ignore RDMA even if available
+        //   "rdma" — only RDMA backends, fail if RDMA not available
+        //   "auto" — try RDMA first, fall back to TCP per peer
+        //   "both" — create both RDMA and TCP backends for each peer
         if let Some(ref remote_cfg) = config.backends.remote
             && remote_cfg.enabled
         {
+            let transport = remote_cfg.transport.as_str();
+            let rdma_available = duvm_backend_rdma::is_rdma_available();
+
+            if transport == "rdma" && !rdma_available {
+                tracing::error!("transport=rdma but no RDMA devices found");
+                anyhow::bail!("transport=rdma requires RDMA hardware or SoftRoCE");
+            }
+
+            let use_rdma = match transport {
+                "rdma" => true,
+                "tcp" => false,
+                "auto" => rdma_available,
+                "both" => rdma_available, // RDMA part; TCP added below
+                _ => {
+                    tracing::warn!(transport, "unknown transport, defaulting to tcp");
+                    false
+                }
+            };
+            let use_tcp = match transport {
+                "rdma" => false,
+                "tcp" => true,
+                "auto" => !rdma_available, // TCP only if RDMA not available
+                "both" => true,            // always
+                _ => true,
+            };
+
             for addr in &remote_cfg.peers {
-                let mut backend = TcpBackend::new(next_id, addr);
-                match backend.init(&BackendConfig {
-                    max_pages: remote_cfg.max_pages_per_peer,
-                    ..Default::default()
-                }) {
-                    Ok(()) => {
-                        tracing::info!(id = next_id, addr, "Remote backend connected");
-                        backends.insert(next_id, Box::new(backend));
-                        next_id += 1;
+                if use_rdma {
+                    let mut backend = RdmaBackend::new(next_id, addr);
+                    match backend.init(&BackendConfig {
+                        max_pages: remote_cfg.max_pages_per_peer,
+                        ..Default::default()
+                    }) {
+                        Ok(()) => {
+                            tracing::info!(id = next_id, addr, transport = "rdma", "Remote RDMA backend connected");
+                            backends.insert(next_id, Box::new(backend));
+                            next_id += 1;
+                        }
+                        Err(e) => {
+                            tracing::warn!(addr, error = %e, "RDMA backend failed");
+                            // If transport=auto and RDMA fails, fall through to TCP
+                            if transport == "auto" {
+                                let mut tcp_backend = TcpBackend::new(next_id, addr);
+                                match tcp_backend.init(&BackendConfig {
+                                    max_pages: remote_cfg.max_pages_per_peer,
+                                    ..Default::default()
+                                }) {
+                                    Ok(()) => {
+                                        tracing::info!(id = next_id, addr, transport = "tcp", "Fell back to TCP after RDMA failure");
+                                        backends.insert(next_id, Box::new(tcp_backend));
+                                        next_id += 1;
+                                    }
+                                    Err(e2) => {
+                                        tracing::warn!(addr, error = %e2, "TCP fallback also failed — skipping peer");
+                                    }
+                                }
+                            }
+                        }
                     }
-                    Err(e) => {
-                        tracing::warn!(addr, error = %e, "Failed to connect remote backend — skipping");
+                }
+
+                if use_tcp {
+                    let mut backend = TcpBackend::new(next_id, addr);
+                    match backend.init(&BackendConfig {
+                        max_pages: remote_cfg.max_pages_per_peer,
+                        ..Default::default()
+                    }) {
+                        Ok(()) => {
+                            tracing::info!(id = next_id, addr, transport = "tcp", "Remote TCP backend connected");
+                            backends.insert(next_id, Box::new(backend));
+                            next_id += 1;
+                        }
+                        Err(e) => {
+                            tracing::warn!(addr, error = %e, "TCP backend failed — skipping peer");
+                        }
                     }
                 }
             }

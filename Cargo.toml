@@ -6,6 +6,7 @@ members = [
     "crates/duvm-backend-memory",
     "crates/duvm-backend-compress",
     "crates/duvm-backend-tcp",
+    "crates/duvm-backend-rdma",
     "crates/duvm-daemon",
     "crates/duvm-ctl",
     "crates/duvm-memserver",
@@ -25,6 +26,7 @@ duvm-backend-trait = { path = "crates/duvm-backend-trait" }
 duvm-backend-memory = { path = "crates/duvm-backend-memory" }
 duvm-backend-compress = { path = "crates/duvm-backend-compress" }
 duvm-backend-tcp = { path = "crates/duvm-backend-tcp" }
+duvm-backend-rdma = { path = "crates/duvm-backend-rdma" }
 duvm-daemon = { path = "crates/duvm-daemon" }
 libduvm = { path = "crates/libduvm" }
 
