@@ -111,9 +111,28 @@ static blk_status_t duvm_queue_rq(struct blk_mq_hw_ctx *hctx,
             ret = duvm_ring_submit_and_wait(&duvm_dev.ring, &req,
                                              &comp, 500);
             if (ret) {
-                /* Ring buffer failed — fall through to xarray fallback */
-                pr_warn_ratelimited("duvm: ring submit failed (%d), using local fallback\n", ret);
-                goto fallback_segment;
+                /*
+                 * Ring submit failed (timeout, daemon dead, ring full).
+                 * Return I/O error so the kernel tries the next swap device.
+                 * Do NOT fall back to xarray — that would hide the failure
+                 * and prevent the kernel from using local SSD swap.
+                 */
+                pr_warn_ratelimited("duvm: ring failed (%d) for %s at offset %lu\n",
+                                     ret, is_write ? "STORE" : "LOAD", idx);
+                blk_mq_end_request(rq, BLK_STS_IOERR);
+                return BLK_STS_OK;
+            }
+
+            /* Check daemon's result code */
+            if (comp.result != 0) {
+                /*
+                 * Daemon returned an error (e.g. all remote servers full).
+                 * Return I/O error so the kernel falls to next swap device.
+                 */
+                pr_warn_ratelimited("duvm: daemon error (%d) for %s at offset %lu\n",
+                                     comp.result, is_write ? "STORE" : "LOAD", idx);
+                blk_mq_end_request(rq, BLK_STS_IOERR);
+                return BLK_STS_OK;
             }
 
             if (!is_write) {
@@ -123,34 +142,6 @@ static blk_status_t duvm_queue_rq(struct blk_mq_hw_ctx *hctx,
                 kunmap_local(dst);
             }
 
-            cur_sector += bvec.bv_len / DUVM_SECTOR_SIZE;
-            continue;
-
-fallback_segment:
-            /* Fallback for this segment: use xarray */
-            if (is_write) {
-                void *src = kmap_local_page(bvec.bv_page) + bvec.bv_offset;
-                struct page *stored = xa_load(&duvm_page_store, idx);
-                if (!stored) {
-                    stored = alloc_page(GFP_NOIO);
-                    if (!stored) {
-                        kunmap_local(src);
-                        blk_mq_end_request(rq, BLK_STS_RESOURCE);
-                        return BLK_STS_OK;
-                    }
-                    xa_store(&duvm_page_store, idx, stored, GFP_NOIO);
-                }
-                memcpy(page_address(stored), src, bvec.bv_len);
-                kunmap_local(src);
-            } else {
-                void *dst = kmap_local_page(bvec.bv_page) + bvec.bv_offset;
-                struct page *stored = xa_load(&duvm_page_store, idx);
-                if (stored)
-                    memcpy(dst, page_address(stored), bvec.bv_len);
-                else
-                    memset(dst, 0, bvec.bv_len);
-                kunmap_local(dst);
-            }
             cur_sector += bvec.bv_len / DUVM_SECTOR_SIZE;
         }
 

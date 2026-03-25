@@ -3,14 +3,28 @@
 //! Listens on a TCP port and serves page store/load requests from duvm clients.
 //! Deploy this on each machine that contributes memory to the distributed pool.
 //!
+//! **Critical design: refuse when full, never recurse.**
+//!
+//! When the memserver's pool is full, it returns RESP_ERR for STORE requests.
+//! The requesting machine's daemon then tries other machines, and if none have
+//! space, returns an error to the kernel module. The kernel falls through to
+//! the next swap device (local SSD). This prevents the mutual-OOM deadlock:
+//!
+//!   A swaps to B → B is full → B returns ERR → A tries C → C is full →
+//!   A falls back to local SSD swap. No recursion.
+//!
+//! The memserver allocates dynamically (no wasteful pre-allocation) but tracks
+//! its usage against max_pages and refuses new pages before the machine runs
+//! out of RAM.
+//!
 //! Usage: duvm-memserver --bind 0.0.0.0:9200 --max-pages 1000000
 //!
-//! Protocol (binary, big-endian):
-//!   ALLOC:  client sends [4], server responds [0][offset:8]
-//!   STORE:  client sends [1][offset:8][data:4096], server responds [0]
-//!   LOAD:   client sends [2][offset:8], server responds [0][data:4096]
-//!   FREE:   client sends [3][offset:8], server responds [0]
-//!   STATUS: client sends [5], server responds [0][used:8][total:8]
+//! Protocol:
+//!   ALLOC:  client sends [4], server responds [status:1][offset:8]
+//!   STORE:  client sends [1][offset:8][data:4096], server responds [status:1]
+//!   LOAD:   client sends [2][offset:8], server responds [status:1][data:4096]
+//!   FREE:   client sends [3][offset:8], server responds [status:1]
+//!   STATUS: client sends [5], server responds [status:1][used:8][total:8]
 
 use anyhow::Result;
 use clap::Parser;
@@ -19,6 +33,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 const OP_STORE: u8 = 1;
 const OP_LOAD: u8 = 2;
@@ -35,9 +50,75 @@ struct Args {
     #[arg(short, long, default_value = "0.0.0.0:9200")]
     bind: String,
 
-    /// Maximum number of pages to serve
+    /// Maximum number of pages to serve.
+    /// Set this to the amount of RAM you want to dedicate to remote pages.
+    /// The memserver refuses STORE requests when this limit is reached.
     #[arg(short, long, default_value = "1000000")]
     max_pages: u64,
+}
+
+/// Shared page storage. All connections share one pool with one capacity limit.
+/// Dynamic allocation — pages are heap-allocated when stored, freed when released.
+/// When max_pages is reached, new STORE requests are refused (RESP_ERR).
+struct PageStore {
+    pages: Mutex<HashMap<u64, Box<[u8; PAGE_SIZE]>>>,
+    max_pages: u64,
+    used: AtomicU64,
+    next_offset: AtomicU64,
+}
+
+impl PageStore {
+    fn new(max_pages: u64) -> Self {
+        Self {
+            pages: Mutex::new(HashMap::new()),
+            max_pages,
+            used: AtomicU64::new(0),
+            next_offset: AtomicU64::new(0),
+        }
+    }
+
+    fn alloc_offset(&self) -> Option<u64> {
+        if self.used.load(Ordering::Relaxed) >= self.max_pages {
+            return None;
+        }
+        Some(self.next_offset.fetch_add(1, Ordering::Relaxed))
+    }
+
+    fn store(&self, offset: u64, data: Box<[u8; PAGE_SIZE]>) -> bool {
+        let mut pages = self.pages.lock().unwrap();
+        if pages.len() as u64 >= self.max_pages && !pages.contains_key(&offset) {
+            return false; // Full and this is a new page (not an overwrite)
+        }
+        let is_new = !pages.contains_key(&offset);
+        pages.insert(offset, data);
+        if is_new {
+            self.used.fetch_add(1, Ordering::Relaxed);
+        }
+        true
+    }
+
+    fn load(&self, offset: u64) -> Option<Box<[u8; PAGE_SIZE]>> {
+        let pages = self.pages.lock().unwrap();
+        pages.get(&offset).map(|data| {
+            let mut copy = Box::new([0u8; PAGE_SIZE]);
+            copy.copy_from_slice(data.as_ref());
+            copy
+        })
+    }
+
+    fn free(&self, offset: u64) -> bool {
+        let mut pages = self.pages.lock().unwrap();
+        if pages.remove(&offset).is_some() {
+            self.used.fetch_sub(1, Ordering::Relaxed);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn used_pages(&self) -> u64 {
+        self.used.load(Ordering::Relaxed)
+    }
 }
 
 fn main() -> Result<()> {
@@ -49,6 +130,9 @@ fn main() -> Result<()> {
         args.max_pages,
         args.max_pages as f64 * PAGE_SIZE as f64 / 1e9
     );
+    eprintln!("  When full: refuses STORE → client falls back to next swap device");
+
+    let store = Arc::new(PageStore::new(args.max_pages));
 
     let listener = TcpListener::bind(&args.bind)?;
     eprintln!("  Listening for connections...");
@@ -59,7 +143,8 @@ fn main() -> Result<()> {
                 let peer = stream.peer_addr().ok();
                 eprintln!("  Client connected from {:?}", peer);
                 stream.set_nodelay(true)?;
-                if let Err(e) = handle_client(stream, args.max_pages) {
+                let store = store.clone();
+                if let Err(e) = handle_client(stream, &store) {
                     eprintln!("  Client disconnected: {}", e);
                 }
             }
@@ -70,19 +155,16 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn handle_client(mut stream: TcpStream, max_pages: u64) -> Result<()> {
-    let mut pages: HashMap<u64, Box<[u8; PAGE_SIZE]>> = HashMap::new();
-    let next_offset = AtomicU64::new(0);
+fn handle_client(mut stream: TcpStream, store: &PageStore) -> Result<()> {
     let mut ops: u64 = 0;
 
     loop {
-        // Read opcode
         let mut op = [0u8; 1];
         if stream.read_exact(&mut op).is_err() {
             eprintln!(
-                "  Session ended after {} ops, {} pages stored",
+                "  Session ended after {} ops, {} pages in store",
                 ops,
-                pages.len()
+                store.used_pages()
             );
             return Ok(());
         }
@@ -90,36 +172,42 @@ fn handle_client(mut stream: TcpStream, max_pages: u64) -> Result<()> {
 
         match op[0] {
             OP_ALLOC => {
-                if pages.len() as u64 >= max_pages {
-                    // Must send full 9-byte response — client always reads 9 bytes
-                    let mut resp = [0u8; 9];
-                    resp[0] = RESP_ERR;
-                    stream.write_all(&resp)?;
-                } else {
-                    let offset = next_offset.fetch_add(1, Ordering::Relaxed);
-                    let mut resp = [0u8; 9];
-                    resp[0] = RESP_OK;
-                    resp[1..9].copy_from_slice(&offset.to_le_bytes());
-                    stream.write_all(&resp)?;
+                match store.alloc_offset() {
+                    Some(offset) => {
+                        let mut resp = [0u8; 9];
+                        resp[0] = RESP_OK;
+                        resp[1..9].copy_from_slice(&offset.to_le_bytes());
+                        stream.write_all(&resp)?;
+                    }
+                    None => {
+                        // Full — client should try another machine or fall back to local swap
+                        let mut resp = [0u8; 9];
+                        resp[0] = RESP_ERR;
+                        stream.write_all(&resp)?;
+                    }
                 }
             }
             OP_STORE => {
-                // Read offset + data
                 let mut header = [0u8; 8];
                 stream.read_exact(&mut header)?;
                 let offset = u64::from_le_bytes(header);
 
                 let mut data = Box::new([0u8; PAGE_SIZE]);
                 stream.read_exact(data.as_mut())?;
-                pages.insert(offset, data);
-                stream.write_all(&[RESP_OK])?;
+
+                if store.store(offset, data) {
+                    stream.write_all(&[RESP_OK])?;
+                } else {
+                    // Pool is full — refuse. Client will try another machine.
+                    stream.write_all(&[RESP_ERR])?;
+                }
             }
             OP_LOAD => {
                 let mut header = [0u8; 8];
                 stream.read_exact(&mut header)?;
                 let offset = u64::from_le_bytes(header);
 
-                match pages.get(&offset) {
+                match store.load(offset) {
                     Some(data) => {
                         stream.write_all(&[RESP_OK])?;
                         stream.write_all(data.as_ref())?;
@@ -133,14 +221,18 @@ fn handle_client(mut stream: TcpStream, max_pages: u64) -> Result<()> {
                 let mut header = [0u8; 8];
                 stream.read_exact(&mut header)?;
                 let offset = u64::from_le_bytes(header);
-                pages.remove(&offset);
-                stream.write_all(&[RESP_OK])?;
+
+                if store.free(offset) {
+                    stream.write_all(&[RESP_OK])?;
+                } else {
+                    stream.write_all(&[RESP_ERR])?;
+                }
             }
             OP_STATUS => {
                 let mut resp = [0u8; 17];
                 resp[0] = RESP_OK;
-                resp[1..9].copy_from_slice(&(pages.len() as u64).to_le_bytes());
-                resp[9..17].copy_from_slice(&max_pages.to_le_bytes());
+                resp[1..9].copy_from_slice(&store.used_pages().to_le_bytes());
+                resp[9..17].copy_from_slice(&store.max_pages.to_le_bytes());
                 stream.write_all(&resp)?;
             }
             _ => {
