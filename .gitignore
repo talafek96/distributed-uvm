@@ -19,3 +19,4 @@ duvm-kmod/.tmp_versions/
 # OS files
 .DS_Store
 Thumbs.db
+linux-image-*.deb

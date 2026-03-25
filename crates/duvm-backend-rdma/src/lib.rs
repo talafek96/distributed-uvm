@@ -36,6 +36,29 @@ pub struct RdmaHandshake {
 
 const HANDSHAKE_SIZE: usize = std::mem::size_of::<RdmaHandshake>();
 
+/// Wait for an RDMA CM event with a timeout. Returns the event pointer (must be acked).
+unsafe fn wait_cm_event(
+    ec: *mut ffi::rdma_event_channel,
+    timeout_ms: i32,
+) -> Result<*mut ffi::rdma_cm_event> {
+    // Use poll() on the event channel fd to avoid blocking forever
+    let mut pfd = libc::pollfd {
+        fd: (*ec).fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let ret = libc::poll(&mut pfd, 1, timeout_ms);
+    if ret <= 0 {
+        bail!("RDMA CM event timeout ({}ms)", timeout_ms);
+    }
+    let mut event: *mut ffi::rdma_cm_event = std::ptr::null_mut();
+    let ret = ffi::rdma_get_cm_event(ec, &mut event);
+    if ret != 0 {
+        bail!("rdma_get_cm_event failed: {}", ret);
+    }
+    Ok(event)
+}
+
 /// RDMA backend using one-sided RDMA WRITE/READ.
 ///
 /// Connection setup via RDMA CM. The server's rkey and buffer address are
@@ -244,18 +267,25 @@ impl DuvmBackend for RdmaBackend {
             bail!("rdma_resolve_addr failed for {}: {}", self.addr, ret);
         }
 
-        // Wait for address resolved event
-        let mut event: *mut ffi::rdma_cm_event = std::ptr::null_mut();
-        let ret = unsafe { ffi::rdma_get_cm_event(ec, &mut event) };
-        if ret != 0 || unsafe { (*event).event } != ffi::RDMA_CM_EVENT_ADDR_RESOLVED {
-            unsafe {
-                if !event.is_null() {
-                    ffi::rdma_ack_cm_event(event);
+        // Wait for address resolved event (5s timeout)
+        let event = match unsafe { wait_cm_event(ec, 5000) } {
+            Ok(e) => e,
+            Err(e) => {
+                unsafe {
+                    ffi::rdma_destroy_id(cm_id);
+                    ffi::rdma_destroy_event_channel(ec);
                 }
+                bail!("RDMA address resolution timeout for {}: {}", self.addr, e);
+            }
+        };
+        let addr_event = unsafe { (*event).event };
+        if addr_event != ffi::RDMA_CM_EVENT_ADDR_RESOLVED {
+            unsafe {
+                ffi::rdma_ack_cm_event(event);
                 ffi::rdma_destroy_id(cm_id);
                 ffi::rdma_destroy_event_channel(ec);
             }
-            bail!("RDMA address resolution failed for {}", self.addr);
+            bail!("RDMA address resolution failed for {} (event={})", self.addr, addr_event);
         }
         unsafe { ffi::rdma_ack_cm_event(event) };
 
@@ -269,16 +299,24 @@ impl DuvmBackend for RdmaBackend {
             bail!("rdma_resolve_route failed: {}", ret);
         }
 
-        let ret = unsafe { ffi::rdma_get_cm_event(ec, &mut event) };
-        if ret != 0 || unsafe { (*event).event } != ffi::RDMA_CM_EVENT_ROUTE_RESOLVED {
-            unsafe {
-                if !event.is_null() {
-                    ffi::rdma_ack_cm_event(event);
+        let event = match unsafe { wait_cm_event(ec, 5000) } {
+            Ok(e) => e,
+            Err(e) => {
+                unsafe {
+                    ffi::rdma_destroy_id(cm_id);
+                    ffi::rdma_destroy_event_channel(ec);
                 }
+                bail!("RDMA route resolution timeout for {}: {}", self.addr, e);
+            }
+        };
+        let route_event = unsafe { (*event).event };
+        if route_event != ffi::RDMA_CM_EVENT_ROUTE_RESOLVED {
+            unsafe {
+                ffi::rdma_ack_cm_event(event);
                 ffi::rdma_destroy_id(cm_id);
                 ffi::rdma_destroy_event_channel(ec);
             }
-            bail!("RDMA route resolution failed for {}", self.addr);
+            bail!("RDMA route resolution failed for {} (event={})", self.addr, route_event);
         }
         unsafe { ffi::rdma_ack_cm_event(event) };
 
@@ -397,13 +435,23 @@ impl DuvmBackend for RdmaBackend {
             bail!("rdma_connect failed: {}", ret);
         }
 
-        let ret = unsafe { ffi::rdma_get_cm_event(ec, &mut event) };
-        if ret != 0 || unsafe { (*event).event } != ffi::RDMA_CM_EVENT_ESTABLISHED {
-            let ev = if event.is_null() {
-                -1
-            } else {
-                unsafe { (*event).event }
-            };
+        // Wait for ESTABLISHED event (10s timeout for connection setup)
+        let event = match unsafe { wait_cm_event(ec, 10000) } {
+            Ok(e) => e,
+            Err(e) => {
+                unsafe {
+                    ffi::ibv_dereg_mr(mr);
+                    libc::munmap(local_buf as *mut libc::c_void, buf_size);
+                    ffi::ibv_destroy_cq(cq);
+                    ffi::ibv_dealloc_pd(pd);
+                    ffi::rdma_destroy_id(cm_id);
+                    ffi::rdma_destroy_event_channel(ec);
+                }
+                bail!("RDMA connect timeout for {}: {}", self.addr, e);
+            }
+        };
+        let conn_event = unsafe { (*event).event };
+        if conn_event != ffi::RDMA_CM_EVENT_ESTABLISHED {
             unsafe {
                 if !event.is_null() {
                     ffi::rdma_ack_cm_event(event);
@@ -415,7 +463,7 @@ impl DuvmBackend for RdmaBackend {
                 ffi::rdma_destroy_id(cm_id);
                 ffi::rdma_destroy_event_channel(ec);
             }
-            bail!("RDMA connection failed (event={})", ev);
+            bail!("RDMA connection failed for {} (event={})", self.addr, conn_event);
         }
 
         // Extract server's handshake (rkey/addr/size) from connection event's private data.

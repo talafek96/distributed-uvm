@@ -24,21 +24,17 @@ pub struct RdmaMemServer {
     running: Arc<AtomicBool>,
 }
 
-struct ServerState {
-    ec: *mut ffi::rdma_event_channel,
-    listen_id: *mut ffi::rdma_cm_id,
+/// Resources allocated lazily on first connection (need verbs context from CM).
+struct ServerResources {
     pd: *mut ffi::ibv_pd,
     mr: *mut ffi::ibv_mr,
     buf: *mut u8,
     buf_size: usize,
-    next_client_offset: AtomicU64,
-    max_pages: u64,
-    pages_per_client: u64,
+    rkey: u32,
 }
 
 // Safety: RDMA resources are only accessed from the server thread.
-unsafe impl Send for ServerState {}
-unsafe impl Sync for ServerState {}
+unsafe impl Send for ServerResources {}
 
 impl RdmaMemServer {
     pub fn new(port: u16, max_pages: u64, pages_per_client: u64) -> Self {
@@ -78,7 +74,6 @@ impl RdmaMemServer {
         let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
         addr.sin_family = libc::AF_INET as u16;
         addr.sin_port = self.port.to_be();
-        // sin_addr = 0 means INADDR_ANY
 
         let ret = unsafe {
             ffi::rdma_bind_addr(listen_id, &mut addr as *mut _ as *mut libc::sockaddr)
@@ -91,7 +86,6 @@ impl RdmaMemServer {
             bail!("rdma_bind_addr failed: {}", ret);
         }
 
-        // Listen
         let ret = unsafe { ffi::rdma_listen(listen_id, 16) };
         if ret != 0 {
             unsafe {
@@ -101,27 +95,100 @@ impl RdmaMemServer {
             bail!("rdma_listen failed: {}", ret);
         }
 
-        // Get the verbs context from the listen ID (available after bind)
-        let verbs = unsafe { (*listen_id).verbs };
-        if verbs.is_null() {
-            unsafe {
-                ffi::rdma_destroy_id(listen_id);
-                ffi::rdma_destroy_event_channel(ec);
+        eprintln!("  RDMA server: listening on port {}", self.port);
+
+        // Resources are allocated lazily on first connection
+        let mut resources: Option<ServerResources> = None;
+        let next_client_offset = AtomicU64::new(0);
+
+        // Event loop
+        while self.running.load(Ordering::Relaxed) {
+            let mut event: *mut ffi::rdma_cm_event = std::ptr::null_mut();
+            let ret = unsafe { ffi::rdma_get_cm_event(ec, &mut event) };
+            if ret != 0 {
+                if !self.running.load(Ordering::Relaxed) {
+                    break;
+                }
+                eprintln!("  RDMA: rdma_get_cm_event failed: {}", ret);
+                break;
             }
-            bail!("rdma_bind_addr did not set verbs context");
+
+            let event_type = unsafe { (*event).event };
+            let conn_id = unsafe { (*event).id };
+
+            match event_type {
+                ffi::RDMA_CM_EVENT_CONNECT_REQUEST => {
+                    // Lazily initialize resources using the verbs context from the first connection
+                    if resources.is_none() {
+                        match self.init_resources(conn_id) {
+                            Ok(res) => {
+                                resources = Some(res);
+                            }
+                            Err(e) => {
+                                eprintln!("  RDMA: failed to init resources: {}", e);
+                                unsafe {
+                                    ffi::rdma_ack_cm_event(event);
+                                    ffi::rdma_destroy_id(conn_id);
+                                }
+                                continue;
+                            }
+                        }
+                    }
+
+                    if let Some(ref res) = resources {
+                        if let Err(e) =
+                            self.handle_connect(res, conn_id, &next_client_offset)
+                        {
+                            eprintln!("  RDMA: connect failed: {}", e);
+                        }
+                    }
+                }
+                ffi::RDMA_CM_EVENT_ESTABLISHED => {
+                    eprintln!("  RDMA: connection established");
+                }
+                ffi::RDMA_CM_EVENT_DISCONNECTED => {
+                    eprintln!("  RDMA: client disconnected");
+                    unsafe {
+                        ffi::rdma_disconnect(conn_id);
+                        ffi::rdma_destroy_id(conn_id);
+                    }
+                }
+                other => {
+                    eprintln!("  RDMA: event {}", other);
+                }
+            }
+
+            unsafe { ffi::rdma_ack_cm_event(event) };
         }
 
-        // Allocate PD
+        // Cleanup
+        if let Some(res) = resources {
+            unsafe {
+                ffi::ibv_dereg_mr(res.mr);
+                libc::munmap(res.buf as *mut libc::c_void, res.buf_size);
+                ffi::ibv_dealloc_pd(res.pd);
+            }
+        }
+        unsafe {
+            ffi::rdma_destroy_id(listen_id);
+            ffi::rdma_destroy_event_channel(ec);
+        }
+
+        Ok(())
+    }
+
+    /// Initialize PD, buffer, and MR using the verbs context from the first connection.
+    fn init_resources(&self, conn_id: *mut ffi::rdma_cm_id) -> Result<ServerResources> {
+        let verbs = unsafe { (*conn_id).verbs };
+        if verbs.is_null() {
+            bail!("connection has no verbs context");
+        }
+
         let pd = unsafe { ffi::ibv_alloc_pd(verbs) };
         if pd.is_null() {
-            unsafe {
-                ffi::rdma_destroy_id(listen_id);
-                ffi::rdma_destroy_event_channel(ec);
-            }
             bail!("ibv_alloc_pd failed");
         }
 
-        // Allocate contiguous buffer for all pages
         let buf_size = self.max_pages as usize * PAGE_SIZE;
         let buf = unsafe {
             libc::mmap(
@@ -134,19 +201,10 @@ impl RdmaMemServer {
             )
         } as *mut u8;
         if buf.is_null() || buf as usize == usize::MAX {
-            unsafe {
-                ffi::ibv_dealloc_pd(pd);
-                ffi::rdma_destroy_id(listen_id);
-                ffi::rdma_destroy_event_channel(ec);
-            }
-            bail!(
-                "mmap for RDMA buffer failed ({} pages, {} bytes)",
-                self.max_pages,
-                buf_size
-            );
+            unsafe { ffi::ibv_dealloc_pd(pd) };
+            bail!("mmap for RDMA buffer failed ({} bytes)", buf_size);
         }
 
-        // Register the entire buffer as one MR
         let mr = unsafe {
             ffi::ibv_reg_mr(
                 pd,
@@ -161,10 +219,8 @@ impl RdmaMemServer {
             unsafe {
                 libc::munmap(buf as *mut libc::c_void, buf_size);
                 ffi::ibv_dealloc_pd(pd);
-                ffi::rdma_destroy_id(listen_id);
-                ffi::rdma_destroy_event_channel(ec);
             }
-            bail!("ibv_reg_mr failed for {} byte buffer", buf_size);
+            bail!("ibv_reg_mr failed");
         }
 
         let rkey = unsafe { (*mr).rkey };
@@ -175,110 +231,43 @@ impl RdmaMemServer {
             rkey,
             buf as u64
         );
-        eprintln!("  RDMA server: listening on port {}", self.port);
 
-        let state = ServerState {
-            ec,
-            listen_id,
+        Ok(ServerResources {
             pd,
             mr,
             buf,
             buf_size,
-            next_client_offset: AtomicU64::new(0),
-            max_pages: self.max_pages,
-            pages_per_client: self.pages_per_client,
-        };
-
-        // Event loop
-        self.event_loop(&state)?;
-
-        // Cleanup
-        unsafe {
-            ffi::ibv_dereg_mr(state.mr);
-            libc::munmap(state.buf as *mut libc::c_void, state.buf_size);
-            ffi::ibv_dealloc_pd(state.pd);
-            ffi::rdma_destroy_id(state.listen_id);
-            ffi::rdma_destroy_event_channel(state.ec);
-        }
-
-        Ok(())
-    }
-
-    fn event_loop(&self, state: &ServerState) -> Result<()> {
-        while self.running.load(Ordering::Relaxed) {
-            let mut event: *mut ffi::rdma_cm_event = std::ptr::null_mut();
-            let ret = unsafe { ffi::rdma_get_cm_event(state.ec, &mut event) };
-            if ret != 0 {
-                if !self.running.load(Ordering::Relaxed) {
-                    break; // Shutting down
-                }
-                bail!("rdma_get_cm_event failed: {}", ret);
-            }
-
-            let event_type = unsafe { (*event).event };
-            let conn_id = unsafe { (*event).id };
-
-            match event_type {
-                ffi::RDMA_CM_EVENT_CONNECT_REQUEST => {
-                    if let Err(e) = self.handle_connect(state, conn_id) {
-                        eprintln!("  RDMA: connect request failed: {}", e);
-                    }
-                }
-                ffi::RDMA_CM_EVENT_ESTABLISHED => {
-                    eprintln!("  RDMA: connection established");
-                }
-                ffi::RDMA_CM_EVENT_DISCONNECTED => {
-                    eprintln!("  RDMA: client disconnected");
-                    unsafe {
-                        ffi::rdma_disconnect(conn_id);
-                        ffi::rdma_destroy_id(conn_id);
-                    }
-                }
-                other => {
-                    eprintln!("  RDMA: unhandled event {}", other);
-                }
-            }
-
-            unsafe { ffi::rdma_ack_cm_event(event) };
-        }
-
-        Ok(())
+            rkey,
+        })
     }
 
     fn handle_connect(
         &self,
-        state: &ServerState,
+        res: &ServerResources,
         conn_id: *mut ffi::rdma_cm_id,
+        next_client_offset: &AtomicU64,
     ) -> Result<()> {
-        // Allocate a slice for this client
-        let client_offset_pages = state
-            .next_client_offset
-            .fetch_add(state.pages_per_client, Ordering::Relaxed);
-        if client_offset_pages + state.pages_per_client > state.max_pages {
+        let client_offset_pages = next_client_offset.fetch_add(self.pages_per_client, Ordering::Relaxed);
+        if client_offset_pages + self.pages_per_client > self.max_pages {
             eprintln!(
-                "  RDMA: refusing connection — out of capacity ({} used of {})",
-                client_offset_pages, state.max_pages
+                "  RDMA: refusing connection — out of capacity ({} of {})",
+                client_offset_pages, self.max_pages
             );
             unsafe { ffi::rdma_destroy_id(conn_id) };
             bail!("RDMA server out of capacity");
         }
 
-        let client_addr = unsafe { state.buf.add(client_offset_pages as usize * PAGE_SIZE) } as u64;
-        let client_size = state.pages_per_client * PAGE_SIZE as u64;
+        let client_addr = unsafe { res.buf.add(client_offset_pages as usize * PAGE_SIZE) } as u64;
+        let client_size = self.pages_per_client * PAGE_SIZE as u64;
 
         // Create CQ for this connection
         let verbs = unsafe { (*conn_id).verbs };
-        if verbs.is_null() {
-            unsafe { ffi::rdma_destroy_id(conn_id) };
-            bail!("conn_id has no verbs context");
-        }
-
         let cq = unsafe {
             ffi::ibv_create_cq(verbs, 16, std::ptr::null_mut(), std::ptr::null_mut(), 0)
         };
         if cq.is_null() {
             unsafe { ffi::rdma_destroy_id(conn_id) };
-            bail!("ibv_create_cq failed for connection");
+            bail!("ibv_create_cq failed");
         }
 
         // Create QP
@@ -299,7 +288,7 @@ impl RdmaMemServer {
             _pad: [0; 4],
         };
 
-        let ret = unsafe { ffi::rdma_create_qp(conn_id, state.pd, &mut qp_attr) };
+        let ret = unsafe { ffi::rdma_create_qp(conn_id, res.pd, &mut qp_attr) };
         if ret != 0 {
             unsafe {
                 ffi::ibv_destroy_cq(cq);
@@ -308,9 +297,9 @@ impl RdmaMemServer {
             bail!("rdma_create_qp failed: {}", ret);
         }
 
-        // Build handshake: send this client's rkey, base address, and size
+        // Send rkey + base address for this client's slice
         let handshake = RdmaHandshake {
-            rkey: unsafe { (*state.mr).rkey },
+            rkey: res.rkey,
             _pad: 0,
             addr: client_addr,
             size: client_size,
@@ -332,11 +321,11 @@ impl RdmaMemServer {
         }
 
         eprintln!(
-            "  RDMA: accepted client — offset={} pages, addr=0x{:x}, size={} pages, rkey=0x{:08x}",
+            "  RDMA: accepted client — pages {}-{}, addr=0x{:x}, rkey=0x{:08x}",
             client_offset_pages,
+            client_offset_pages + self.pages_per_client,
             client_addr,
-            state.pages_per_client,
-            handshake.rkey
+            res.rkey
         );
 
         Ok(())

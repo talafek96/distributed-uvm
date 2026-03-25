@@ -122,8 +122,14 @@ pub struct rdma_cm_id {
 pub const RDMA_PS_TCP: c_int = 0x0106;
 
 pub const RDMA_CM_EVENT_ADDR_RESOLVED: c_int = 0;
-pub const RDMA_CM_EVENT_ROUTE_RESOLVED: c_int = 1;
+pub const RDMA_CM_EVENT_ADDR_ERROR: c_int = 1;
+pub const RDMA_CM_EVENT_ROUTE_RESOLVED: c_int = 2;
+pub const RDMA_CM_EVENT_ROUTE_ERROR: c_int = 3;
 pub const RDMA_CM_EVENT_CONNECT_REQUEST: c_int = 4;
+pub const RDMA_CM_EVENT_CONNECT_RESPONSE: c_int = 5;
+pub const RDMA_CM_EVENT_CONNECT_ERROR: c_int = 6;
+pub const RDMA_CM_EVENT_UNREACHABLE: c_int = 7;
+pub const RDMA_CM_EVENT_REJECTED: c_int = 8;
 pub const RDMA_CM_EVENT_ESTABLISHED: c_int = 9;
 pub const RDMA_CM_EVENT_DISCONNECTED: c_int = 10;
 

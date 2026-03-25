@@ -65,6 +65,11 @@ struct Args {
     /// Maximum pages per RDMA client (each client gets its own slice of the buffer).
     #[arg(long, default_value = "100000")]
     rdma_pages_per_client: u64,
+
+    /// Port for RDMA listener (default: TCP port + 1). Must differ from TCP port
+    /// because iWARP (SoftiWARP) uses TCP as transport.
+    #[arg(long)]
+    rdma_port: Option<u16>,
 }
 
 /// Shared page storage. All connections share one pool with one capacity limit.
@@ -144,19 +149,20 @@ fn main() -> Result<()> {
 
     // Start RDMA listener in a background thread if requested
     if args.rdma {
-        let port: u16 = args
+        let tcp_port: u16 = args
             .bind
             .split(':')
             .last()
             .unwrap_or("9200")
             .parse()
             .unwrap_or(9200);
+        let rdma_port = args.rdma_port.unwrap_or(tcp_port + 1);
         let rdma_max_pages = args.max_pages;
         let rdma_pages_per_client = args.rdma_pages_per_client;
 
         std::thread::spawn(move || {
             let server = duvm_backend_rdma::server::RdmaMemServer::new(
-                port,
+                rdma_port,
                 rdma_max_pages,
                 rdma_pages_per_client,
             );
@@ -164,7 +170,7 @@ fn main() -> Result<()> {
                 eprintln!("  RDMA server error: {}", e);
             }
         });
-        eprintln!("  RDMA listener: enabled (pages_per_client={})", args.rdma_pages_per_client);
+        eprintln!("  RDMA listener: port={}, pages_per_client={}", rdma_port, args.rdma_pages_per_client);
     }
 
     let store = Arc::new(PageStore::new(args.max_pages));

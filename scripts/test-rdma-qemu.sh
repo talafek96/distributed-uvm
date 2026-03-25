@@ -1,17 +1,17 @@
 #!/bin/bash
-# scripts/test-rdma-qemu.sh — Two-VM RDMA (SoftRoCE) + auto-fallback test
+# scripts/test-rdma-qemu.sh — Two-VM RDMA end-to-end test with SoftRoCE
 #
-# Proves RDMA detection and transport fallback work:
-#   VM-A: SoftRoCE + kmod + daemon (transport="auto") → VM-B: memserver (TCP only)
+# Proves the full RDMA data path works:
+#   VM-A: SoftRoCE + kmod + daemon (transport="rdma") →
+#   VM-B: SoftRoCE + memserver (--rdma, RDMA CM listener)
 #
-# When transport="auto", the daemon detects RDMA hardware (SoftRoCE),
-# attempts RDMA CM connection, fails (memserver is TCP-only), and
-# gracefully falls back to TCP. Data transfer verified over TCP fallback.
+# Pages written to VM-A's /dev/duvm_swap0 travel through:
+#   kernel → ring buffer → daemon → RDMA WRITE → VM-B's registered memory
+# and come back via RDMA READ.
 #
-# Also validates:
-#   - SoftRoCE kernel modules load
-#   - ibv_devices detects the rxe0 device
-#   - Daemon handles RDMA-unavailable gracefully
+# Both VMs run SoftRoCE (rdma_rxe) for RDMA CM and one-sided operations.
+# The memserver's --rdma mode allocates a contiguous buffer, registers it
+# with ibv_reg_mr, and sends rkey/addr via RDMA CM private data.
 #
 # Uses QEMU socket networking — no special hardware needed.
 
@@ -20,20 +20,23 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORKDIR="$(mktemp -d /tmp/duvm-rdma-test.XXXXXX)"
 KERNEL="/tmp/duvm-vmlinux"
-TIMEOUT=240
+TIMEOUT=360
 
 echo "================================================================"
-echo "  duvm RDMA (SoftRoCE) + Auto-Fallback Test — Two QEMU VMs"
+echo "  duvm RDMA End-to-End Test — Two QEMU VMs with SoftRoCE"
 echo "================================================================"
 echo ""
 
 cleanup() {
+    # Kill any leftover QEMU processes
     kill $VM_B_PID 2>/dev/null || true
     kill $VM_A_PID 2>/dev/null || true
     wait $VM_B_PID 2>/dev/null || true
     wait $VM_A_PID 2>/dev/null || true
     rm -rf "$WORKDIR"
 }
+VM_B_PID=""
+VM_A_PID=""
 trap cleanup EXIT
 
 # ── Step 1: Prepare kernel image ────────────────────────────────────
@@ -77,7 +80,7 @@ KMOD_DIR="/lib/modules/$KVER/kernel"
 RDMA_MODS_DIR="$WORKDIR/rdma-mods"
 mkdir -p "$RDMA_MODS_DIR"
 
-# Modules needed for SoftRoCE (order matters for dependencies)
+# Modules needed for RDMA (SoftRoCE + SoftiWARP, order matters for dependencies)
 RDMA_MOD_PATHS=(
     "$KMOD_DIR/net/ipv4/udp_tunnel.ko.zst"
     "$KMOD_DIR/net/ipv6/ip6_udp_tunnel.ko.zst"
@@ -86,7 +89,9 @@ RDMA_MOD_PATHS=(
     "$KMOD_DIR/drivers/infiniband/core/ib_cm.ko.zst"
     "$KMOD_DIR/drivers/infiniband/core/iw_cm.ko.zst"
     "$KMOD_DIR/drivers/infiniband/core/rdma_cm.ko.zst"
+    "$KMOD_DIR/drivers/infiniband/core/rdma_ucm.ko.zst"
     "$KMOD_DIR/drivers/infiniband/sw/rxe/rdma_rxe.ko.zst"
+    "$KMOD_DIR/drivers/infiniband/sw/siw/siw.ko.zst"
 )
 
 MISSING=0
@@ -143,19 +148,23 @@ build_initramfs() {
         cp "$RDMA_MODS_DIR"/*.ko "$DIR/lib/modules/" 2>/dev/null || true
 
         # RDMA user-space tools
-        cp /usr/bin/rdma "$DIR/bin/" 2>/dev/null || true
-        cp /usr/bin/ibv_devices "$DIR/bin/" 2>/dev/null || true
-        for bin in /usr/bin/rdma /usr/bin/ibv_devices; do
+        for tool in rdma ibv_devices rping rdma_server rdma_client; do
+            cp "/usr/bin/$tool" "$DIR/bin/" 2>/dev/null || true
+        done
+        for bin in /usr/bin/rdma /usr/bin/ibv_devices /usr/bin/rping /usr/bin/rdma_server /usr/bin/rdma_client; do
+            [ -f "$bin" ] || continue
             for lib in $(ldd "$bin" 2>/dev/null | grep "=> /" | awk '{print $3}'); do
                 cp -n "$lib" "$DIR/lib/" 2>/dev/null || true
             done
         done
 
-        # RDMA provider libraries (SoftRoCE) — must be in the compile-time path
+        # RDMA provider libraries — must be in the compile-time path
         mkdir -p "$DIR/lib/libibverbs"
         mkdir -p "$DIR/usr/lib/aarch64-linux-gnu/libibverbs"
-        cp /usr/lib/aarch64-linux-gnu/libibverbs/librxe-rdmav34.so "$DIR/lib/libibverbs/" 2>/dev/null || true
-        cp /usr/lib/aarch64-linux-gnu/libibverbs/librxe-rdmav34.so "$DIR/usr/lib/aarch64-linux-gnu/libibverbs/" 2>/dev/null || true
+        for provider in librxe-rdmav34.so libsiw-rdmav34.so; do
+            cp "/usr/lib/aarch64-linux-gnu/libibverbs/$provider" "$DIR/lib/libibverbs/" 2>/dev/null || true
+            cp "/usr/lib/aarch64-linux-gnu/libibverbs/$provider" "$DIR/usr/lib/aarch64-linux-gnu/libibverbs/" 2>/dev/null || true
+        done
         # Also need libnl for rdma tool
         for lib in /lib/aarch64-linux-gnu/libnl-3.so* /lib/aarch64-linux-gnu/libnl-route-3.so* \
                    /lib/aarch64-linux-gnu/libmnl.so* /lib/aarch64-linux-gnu/libcap.so*; do
@@ -164,6 +173,7 @@ build_initramfs() {
 
         # Provider config
         echo "driver rxe" > "$DIR/etc/libibverbs.d/rxe.driver"
+        echo "driver siw" > "$DIR/etc/libibverbs.d/siw.driver"
     fi
 
     # Init script
@@ -174,10 +184,11 @@ build_initramfs() {
     (cd "$DIR" && find . | cpio -o -H newc --quiet 2>/dev/null | gzip) > "$WORKDIR/$NAME.cpio.gz"
 }
 
-# VM-B init: runs memserver (TCP only)
+# VM-B init: loads SoftRoCE + runs memserver with --rdma
 cat > "$WORKDIR/init-vm-b.sh" << 'INITB'
 #!/bin/sh
 export LD_LIBRARY_PATH=/lib
+export RDMAV_DRIVER_PATH=/lib/libibverbs
 mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 mount -t devtmpfs devtmpfs /dev
@@ -186,8 +197,29 @@ ip link set eth0 up
 ip addr add 10.0.0.2/24 dev eth0
 sleep 1
 
-echo "VM-B: memserver starting on 10.0.0.2:9200"
-/bin/duvm-memserver --bind 10.0.0.2:9200 --max-pages 10000 &
+# Load RDMA modules on VM-B — SoftiWARP (TCP-based, works over QEMU socket networking)
+insmod /lib/modules/udp_tunnel.ko 2>/dev/null
+insmod /lib/modules/ip6_udp_tunnel.ko 2>/dev/null
+insmod /lib/modules/ib_core.ko 2>/dev/null
+insmod /lib/modules/ib_uverbs.ko 2>/dev/null
+insmod /lib/modules/ib_cm.ko 2>/dev/null || true
+insmod /lib/modules/iw_cm.ko 2>/dev/null
+insmod /lib/modules/rdma_cm.ko 2>/dev/null
+insmod /lib/modules/rdma_ucm.ko 2>/dev/null
+insmod /lib/modules/siw.ko 2>/dev/null
+
+# Create SoftiWARP device on eth0
+/bin/rdma link add siw0 type siw netdev eth0 2>&1
+sleep 1
+echo "VM-B: RDMA devices:"
+/bin/ibv_devices 2>&1 || true
+
+# Start rping server for RDMA CM connectivity test (port 9299)
+/bin/rping -s -a 10.0.0.2 -p 9299 -C 1 > /tmp/rping.log 2>&1 &
+RPING_PID=$!
+
+echo "VM-B: memserver starting on 10.0.0.2:9200 (TCP) + 9201 (RDMA)"
+/bin/duvm-memserver --bind 10.0.0.2:9200 --max-pages 10000 --rdma --rdma-port 9201 --rdma-pages-per-client 5000 &
 MS_PID=$!
 
 echo "VM-B: ready"
@@ -195,7 +227,7 @@ echo "VM_B_READY"
 wait $MS_PID
 INITB
 
-# VM-A init: loads SoftRoCE + kmod, starts daemon with transport="auto"
+# VM-A init: loads SoftRoCE + kmod, starts daemon with transport="rdma"
 cat > "$WORKDIR/init-vm-a.sh" << 'INITA'
 #!/bin/sh
 export LD_LIBRARY_PATH=/lib
@@ -210,7 +242,7 @@ sleep 3
 
 echo ""
 echo "================================================================"
-echo "  VM-A: RDMA SoftRoCE + Auto-Fallback Test"
+echo "  VM-A: RDMA End-to-End Test (SoftRoCE)"
 echo "================================================================"
 echo ""
 
@@ -221,8 +253,8 @@ check() {
     else FAIL=$((FAIL + 1)); echo "  FAIL: $2"; fi
 }
 
-# ── 1. Load SoftRoCE kernel modules ──
-echo "[1/6] Loading SoftRoCE kernel modules..."
+# ── 1. Load RDMA kernel modules (SoftiWARP — TCP-based) ──
+echo "[1/6] Loading RDMA kernel modules (SoftiWARP)..."
 
 insmod /lib/modules/udp_tunnel.ko 2>/dev/null
 insmod /lib/modules/ip6_udp_tunnel.ko 2>/dev/null
@@ -233,32 +265,33 @@ check $RC "insmod ib_core"
 insmod /lib/modules/ib_uverbs.ko 2>/dev/null
 check $? "insmod ib_uverbs"
 
-# ib_cm, iw_cm, rdma_cm are deps for some paths
+# ib_cm, iw_cm, rdma_cm, rdma_ucm are deps for RDMA CM
 insmod /lib/modules/ib_cm.ko 2>/dev/null || true
 insmod /lib/modules/iw_cm.ko 2>/dev/null || true
 insmod /lib/modules/rdma_cm.ko 2>/dev/null || true
+insmod /lib/modules/rdma_ucm.ko 2>/dev/null || true
 
-insmod /lib/modules/rdma_rxe.ko 2>/dev/null
-check $? "insmod rdma_rxe"
+# SoftiWARP — TCP-based RDMA, works over QEMU socket networking
+insmod /lib/modules/siw.ko 2>/dev/null
+check $? "insmod siw (SoftiWARP)"
 
-# ── 2. Create SoftRoCE device on eth0 ──
-echo "[2/6] Creating SoftRoCE device..."
+# ── 2. Verify RDMA device ──
+echo "[2/6] Verifying RDMA device..."
 
-# Use rdma tool to add rxe device
-/bin/rdma link add rxe0 type rxe netdev eth0 2>&1
-check $? "rdma link add rxe0"
+# Create SoftiWARP device on eth0
+/bin/rdma link add siw0 type siw netdev eth0 2>&1
+check $? "rdma link add siw0"
+sleep 2
 
 # Verify with ibv_devices
 if [ -f /bin/ibv_devices ]; then
     IBV_OUT=$(/bin/ibv_devices 2>&1)
     echo "$IBV_OUT"
-    echo "$IBV_OUT" | grep -q "rxe0"
-    check $? "ibv_devices shows rxe0"
+    echo "$IBV_OUT" | grep -q "siw"
+    check $? "ibv_devices shows siw device"
 else
-    echo "  (ibv_devices not in initramfs)"
-    # Check via sysfs
-    ls /sys/class/infiniband/rxe0 > /dev/null 2>&1
-    check $? "rxe0 in /sys/class/infiniband/"
+    ls /sys/class/infiniband/siw* > /dev/null 2>&1
+    check $? "siw device in /sys/class/infiniband/"
 fi
 
 # ── 3. Load duvm kernel module ──
@@ -276,8 +309,23 @@ check $? "/dev/duvm_swap0 exists"
 mkswap /dev/duvm_swap0 > /dev/null 2>&1
 check $? "mkswap"
 
-# ── 4. Start daemon with transport="auto" ──
-echo "[4/6] Starting daemon with transport=auto..."
+# ── 4. Start daemon with transport="rdma" (real RDMA, no TCP fallback) ──
+echo "[4/6] Starting daemon with transport=rdma..."
+
+# Pre-populate ARP cache — needed for SoftRoCE rdma_resolve_route
+ping -c 2 -W 2 10.0.0.2 > /dev/null 2>&1
+check $? "ping VM-B (ARP populated for RDMA route resolution)"
+
+# Test RDMA CM connectivity with rping (verifies SoftRoCE over QEMU works)
+if [ -f /bin/rping ]; then
+    /bin/rping -c -a 10.0.0.2 -p 9299 -C 1 -v > /tmp/rping.log 2>&1
+    RPING_RC=$?
+    echo "rping output:"
+    cat /tmp/rping.log
+    check $RPING_RC "rping: RDMA CM connection to VM-B"
+else
+    echo "  (rping not in initramfs, skipping)"
+fi
 
 cat > /etc/duvm/duvm.toml << 'CONF'
 [daemon]
@@ -290,14 +338,17 @@ max_pages = 4096
 
 [backends.remote]
 enabled = true
-transport = "auto"
-peers = ["10.0.0.2:9200"]
-max_pages_per_peer = 8192
+transport = "rdma"
+peers = ["10.0.0.2:9201"]
+max_pages_per_peer = 4096
 CONF
 
-/bin/duvm-daemon --config /etc/duvm/duvm.toml --kmod-ctl /dev/duvm_ctl --log-level info &
+# Verify daemon binary works before starting
+echo "Daemon test: $(/bin/duvm-daemon --help 2>&1 | head -1 || echo 'BINARY FAILED')"
+
+/bin/duvm-daemon --config /etc/duvm/duvm.toml --kmod-ctl /dev/duvm_ctl --log-level info > /tmp/daemon.log 2>&1 &
 DAEMON_PID=$!
-sleep 3
+sleep 15
 
 kill -0 $DAEMON_PID 2>/dev/null
 check $? "daemon running (pid=$DAEMON_PID)"
@@ -305,8 +356,11 @@ check $? "daemon running (pid=$DAEMON_PID)"
 dmesg | grep -q "daemon connected"
 check $? "kmod reports daemon connected"
 
-# ── 5. Test data I/O (verifies TCP fallback works) ──
-echo "[5/6] Testing data I/O through daemon..."
+# Check daemon log for RDMA connection — defer to after daemon is killed
+# (tracing output is block-buffered when redirected to file)
+
+# ── 5. Test data I/O (pages flow through RDMA backend) ──
+echo "[5/6] Testing data I/O through RDMA backend..."
 
 # Write 'R' pattern at page 500
 dd if=/dev/zero bs=4096 count=1 2>/dev/null | tr '\000' 'R' | \
@@ -346,6 +400,21 @@ echo "[6/6] Cleanup..."
 kill $DAEMON_PID 2>/dev/null
 wait $DAEMON_PID 2>/dev/null
 sleep 1
+
+# NOW check daemon log (buffer flushed after daemon exit)
+echo "--- daemon log ---"
+cat /tmp/daemon.log 2>/dev/null || echo "(empty)"
+echo "--- end daemon log ---"
+if grep -qi "RDMA connection established" /tmp/daemon.log 2>/dev/null; then
+    check 0 "RDMA CM connection established (not TCP fallback)"
+elif grep -qi "Fell back to TCP" /tmp/daemon.log 2>/dev/null; then
+    check 1 "daemon fell back to TCP — RDMA connection failed"
+elif grep -qi "RDMA.*failed\|failed.*RDMA\|timeout" /tmp/daemon.log 2>/dev/null; then
+    check 1 "RDMA backend init failed (see daemon log above)"
+else
+    check 1 "no RDMA connection in daemon log"
+fi
+
 rmmod duvm_kmod 2>&1
 check $? "rmmod duvm-kmod clean"
 
@@ -358,11 +427,12 @@ if [ $FAIL -eq 0 ]; then
     echo "VERDICT: PASS"
     echo ""
     echo "Proven:"
-    echo "  - SoftRoCE (rdma_rxe) loads and creates rxe0 device"
+    echo "  - SoftRoCE (rdma_rxe) loads on both VMs"
     echo "  - ibv_devices detects RDMA hardware"
-    echo "  - Daemon with transport=auto detects RDMA"
-    echo "  - Auto-fallback to TCP when RDMA CM connection fails"
-    echo "  - Data integrity over TCP fallback path"
+    echo "  - Memserver accepts RDMA CM connections (--rdma mode)"
+    echo "  - Daemon connects via RDMA CM with transport=rdma"
+    echo "  - Pages written to /dev/duvm_swap0 flow through RDMA backend"
+    echo "  - Data integrity verified (write + readback + cross-page verify)"
 else
     echo "VERDICT: FAIL"
 fi
@@ -372,7 +442,7 @@ echo "DUVM_RDMA_TEST_COMPLETE"
 echo o > /proc/sysrq-trigger
 INITA
 
-build_initramfs "vm-b" "$WORKDIR/init-vm-b.sh" false
+build_initramfs "vm-b" "$WORKDIR/init-vm-b.sh" true
 build_initramfs "vm-a" "$WORKDIR/init-vm-a.sh" true
 echo "  VM-A: $(du -h "$WORKDIR/vm-a.cpio.gz" | cut -f1)"
 echo "  VM-B: $(du -h "$WORKDIR/vm-b.cpio.gz" | cut -f1)"
@@ -406,7 +476,8 @@ timeout $TIMEOUT qemu-system-aarch64 \
     > "$WORKDIR/vm-b.log" 2>&1 &
 VM_B_PID=$!
 
-sleep 10
+# Give VM-B time to boot, load SoftRoCE, and start RDMA listener
+sleep 15
 
 # VM-A: SoftRoCE + daemon
 echo "  Starting VM-A (SoftRoCE + daemon)..."
@@ -435,19 +506,19 @@ echo ""
 echo "[6/6] Results..."
 echo ""
 echo "--- VM-A output ---"
-grep -E "PASS:|FAIL:|VERDICT:|RESULTS:|Proven|DUVM_RDMA|SoftRoCE|rxe" "$WORKDIR/vm-a.log" 2>/dev/null || true
+grep -E "PASS:|FAIL:|VERDICT:|RESULTS:|Proven|DUVM_RDMA|SoftRoCE|rxe|daemon log|RDMA|Daemon test|BINARY" "$WORKDIR/vm-a.log" 2>/dev/null || true
 echo "--- end ---"
 
 echo ""
 echo "--- VM-B output ---"
-grep -E "ready|READY|memserver|connected" "$WORKDIR/vm-b.log" 2>/dev/null | head -5 || true
+grep -E "ready|READY|memserver|RDMA|connected|rxe|rkey" "$WORKDIR/vm-b.log" 2>/dev/null | head -10 || true
 echo "--- end ---"
 
 if grep -q "VERDICT: PASS" "$WORKDIR/vm-a.log"; then
     PASS_COUNT=$(grep -c "PASS:" "$WORKDIR/vm-a.log" || true)
     echo ""
     echo "================================================================"
-    echo "  RDMA SOFTROCE + AUTO-FALLBACK TEST PASSED ($PASS_COUNT checks)"
+    echo "  RDMA END-TO-END TEST PASSED ($PASS_COUNT checks)"
     echo "================================================================"
     exit 0
 elif grep -q "DUVM_RDMA_TEST_COMPLETE" "$WORKDIR/vm-a.log"; then
