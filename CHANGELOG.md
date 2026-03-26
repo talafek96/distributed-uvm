@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-03-26 — Engine retry, distributed TCP test, memserver hardening
+
+- **Engine store retry/fallback:** `store_page` now tries all healthy backends in the tier (least-loaded first) before returning an error. If the first backend fails (e.g., network error), the next one is attempted. Replaced `tier_to_backend_id` (single pick) with `tier_backend_candidates` (ranked list).
+- **Distributed test TCP path:** `test-distributed-qemu.sh` now configures a `[backends.remote]` TCP backend pointing to VM-B's memserver. Pages actually flow kmod → daemon → TCP → memserver. Verifies daemon connected to remote backend + data integrity. (15 checks, up from 12.)
+- **Memserver connection limits:** `--max-connections` (default 256) rejects new TCP connections when limit is reached. `--idle-timeout` (default 300s) closes connections with no activity. Prevents unbounded thread spawning.
+
 ## 2026-03-26 — TCP backend reconnection and circuit breaker
 
 - **Auto-reconnect:** TCP backend now clears broken streams on I/O error and automatically reconnects on the next operation. Memserver restarts no longer brick the backend.

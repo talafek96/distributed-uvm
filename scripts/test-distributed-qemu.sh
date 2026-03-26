@@ -184,41 +184,30 @@ mkswap /dev/duvm_swap0 > /dev/null 2>&1
 check $? "mkswap"
 
 # ── Write daemon config with TCP backend pointing to VM-B ──
+# Remote TCP backend is the ONLY storage backend — pages MUST flow over network.
+# Small local memory backend for the daemon's internal bookkeeping.
 cat > /etc/duvm/duvm.toml << 'CONF'
 [daemon]
-log_level = "warn"
+log_level = "info"
 socket_path = "/tmp/duvm.sock"
 
 [backends.memory]
-enabled = false
+enabled = true
+max_pages = 8192
 
 [backends.compress]
 enabled = false
+
+[backends.remote]
+enabled = true
+transport = "tcp"
+peers = ["10.0.0.2:9200"]
+max_pages_per_peer = 4096
 CONF
 
 # ── Start daemon ──
 echo "[3/5] Starting daemon (TCP → VM-B:9200)..."
-# The daemon connects to /dev/duvm_ctl for the ring buffer.
-# For the TCP backend, we need it configured. Since config doesn't have
-# a TCP section yet, we'll test the ring buffer with local backends first,
-# then verify network connectivity separately.
-
-# Start daemon with local memory backend for ring buffer test
-cat > /etc/duvm/duvm.toml << 'CONF2'
-[daemon]
-log_level = "warn"
-socket_path = "/tmp/duvm.sock"
-
-[backends.memory]
-enabled = true
-max_pages = 8192
-
-[backends.compress]
-enabled = true
-max_pages = 8192
-CONF2
-
-/bin/duvm-daemon --config /etc/duvm/duvm.toml --kmod-ctl /dev/duvm_ctl --log-level warn &
+/bin/duvm-daemon --config /etc/duvm/duvm.toml --kmod-ctl /dev/duvm_ctl --log-level info > /tmp/daemon.log 2>&1 &
 DAEMON_PID=$!
 sleep 2
 
@@ -227,6 +216,10 @@ check $? "daemon running (pid=$DAEMON_PID)"
 
 dmesg | grep -q "daemon connected"
 check $? "kmod reports daemon connected"
+
+# Check that daemon connected to the TCP backend
+grep -q "Remote TCP backend connected" /tmp/daemon.log 2>/dev/null
+check $? "daemon connected to VM-B TCP backend"
 
 # ── Test ring buffer I/O through daemon ──
 echo "[4/5] Testing I/O through daemon engine..."
@@ -264,8 +257,8 @@ else
     check 1 "data integrity: page 1000 corrupted (expected 'D', got '$VERIFY')"
 fi
 
-# ── Test TCP connectivity to VM-B's memserver ──
-echo "[5/5] Testing TCP connectivity to VM-B memserver..."
+# ── Verify TCP backend connected ──
+echo "[5/5] Verifying TCP backend connected..."
 
 # Send ALLOC request to VM-B memserver (opcode 4, expect 9-byte response)
 ALLOC_RESP=$(echo -ne '\x04' | nc -w 2 10.0.0.2 9200 | wc -c)
@@ -292,10 +285,10 @@ if [ $FAIL -eq 0 ]; then
     echo ""
     echo "Proven in two-VM distributed setup:"
     echo "  - Kernel module loads and creates devices"
-    echo "  - Daemon connects via ring buffer"
-    echo "  - Pages round-trip through kmod → ring → daemon → backend"
-    echo "  - VM-A can reach VM-B's memserver over virtual network"
+    echo "  - Daemon connects via ring buffer AND remote TCP backend"
+    echo "  - Pages round-trip through kmod → ring → daemon → TCP → memserver"
     echo "  - Data integrity verified across multiple offsets"
+    echo "  - VM-A can reach VM-B's memserver over virtual network"
 else
     echo "VERDICT: FAIL"
 fi

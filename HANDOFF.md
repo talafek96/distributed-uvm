@@ -27,7 +27,7 @@
 | `cargo test` | 196 pass | User-space engine, policy, backends, config, transport modes, TCP capacity, reconnection |
 | `test-kmod-qemu.sh` | 16/16 | Kernel module: load, block I/O, swap, unload |
 | `test-kmod-daemon-qemu.sh` | 10/10 | Ring buffer: kmod → daemon → engine → backend |
-| `test-distributed-qemu.sh` | 12/12 | Two VMs: kmod+daemon on A, memserver on B, network I/O |
+| `test-distributed-qemu.sh` | 13/13 | Two VMs: kmod+daemon on A, **TCP backend → memserver on B**, network I/O + data integrity |
 | `test-mutual-oom-qemu.sh` | 9/9 | Two VMs: mutual OOM degradation, graceful fallback |
 | `test-3machine-qemu.sh` | 10/10 | Three VMs: fair distribution across peers, exhaustion handling |
 | `test-rdma-qemu.sh` | 18/18 | **Full RDMA: SoftiWARP, CM handshake, one-sided WRITE/READ, data integrity** |
@@ -130,9 +130,7 @@ sudo bash scripts/setup-kmod-for-testing.sh --teardown  # Cleanup
 | Gap | Severity | Detail |
 |---|---|---|
 | RDMA backend has no reconnection | High | Unlike TCP (which now auto-reconnects), RDMA connection drop is permanent. `is_healthy()` only checks init state, doesn't detect broken connections. |
-| Engine has no retry/fallback | Medium | If selected backend's `store_page`/`load_page` fails, daemon returns error immediately — doesn't try another backend of the same tier. |
 | Daemon shutdown doesn't drain pages | Medium | `Ctrl+C` / SIGTERM calls `backend.shutdown()` but doesn't run `swapoff` first. Remote pages are abandoned. Operator must run `duvm-ctl drain` manually before stopping. |
-| Memserver has no connection limits | Medium | Unbounded `thread::spawn` per client. No max connections, no idle timeout, no per-client page limits. DoS risk. |
 
 #### Performance
 
@@ -151,7 +149,6 @@ sudo bash scripts/setup-kmod-for-testing.sh --teardown  # Cleanup
 
 | Gap | Severity | Detail |
 |---|---|---|
-| `test-distributed-qemu.sh` doesn't test TCP path | High | Uses local memory backend, only checks TCP connectivity with `nc`. Pages don't actually flow kmod → daemon → TCP → memserver. |
 | `test-3machine-qemu.sh` doesn't verify distribution | Medium | Writes pages and reads them back, but doesn't check that pages actually went to different peers (B and C). |
 | No `duvm-ctl enable/disable` integration test | Medium | These commands are untested end-to-end. |
 | No daemon crash recovery test | Medium | No test for: daemon dies mid-request → kmod doesn't hang → kernel falls back. |
@@ -162,12 +159,9 @@ sudo bash scripts/setup-kmod-for-testing.sh --teardown  # Cleanup
 
 ### Phase 3 — Production hardening (no hardware needed)
 
-1. **Fix `test-distributed-qemu.sh`** — configure TCP backend in daemon so pages actually flow kmod → daemon → TCP → memserver → verify data integrity. Highest-impact test gap.
-2. **Engine retry/fallback** — when `store_page` fails on one backend, try the next healthy backend of the same tier before returning error to kernel.
-3. **Prometheus metrics** — HTTP listener on `metrics_port` exposing `DaemonStats` + backend health in Prometheus exposition format.
-4. **SIGHUP config reload** — daemon re-reads `duvm.toml` on SIGHUP, adds/removes backends for new/removed peers without full restart.
-5. **Memserver connection limits** — max connections, idle timeout, per-client page quota.
-6. **RDMA reconnection** — port the TCP auto-reconnect + circuit breaker pattern to RDMA backend.
+1. **Prometheus metrics** — HTTP listener on `metrics_port` exposing `DaemonStats` + backend health in Prometheus exposition format.
+2. **SIGHUP config reload** — daemon re-reads `duvm.toml` on SIGHUP, adds/removes backends for new/removed peers without full restart.
+3. **RDMA reconnection** — port the TCP auto-reconnect + circuit breaker pattern to RDMA backend.
 
 ### Phase 4 — Production validation (needs hardware)
 

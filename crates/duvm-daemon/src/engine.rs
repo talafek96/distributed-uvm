@@ -12,7 +12,7 @@ use duvm_common::page::{PageBuffer, PageHandle, Tier};
 use duvm_common::stats::DaemonStats;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
 
@@ -22,8 +22,6 @@ pub struct Engine {
     backends: HashMap<u8, Box<dyn DuvmBackend>>,
     policy: Arc<PolicyEngine>,
     stats: Arc<DaemonStats>,
-    /// Round-robin counter for distributing pages across same-tier backends.
-    round_robin: AtomicUsize,
 }
 
 impl Engine {
@@ -177,7 +175,6 @@ impl Engine {
             backends,
             policy,
             stats,
-            round_robin: AtomicUsize::new(0),
         })
     }
 
@@ -191,7 +188,6 @@ impl Engine {
             backends,
             policy: Arc::new(PolicyEngine::new(Strategy::Lru)),
             stats: Arc::new(DaemonStats::new()),
-            round_robin: AtomicUsize::new(0),
         }
     }
 
@@ -249,32 +245,42 @@ impl Engine {
             }
         };
 
-        let backend_id = self.tier_to_backend_id(tier);
-        let backend = self.backends.get(&backend_id).ok_or_else(|| {
-            self.stats.store_errors.fetch_add(1, Ordering::Relaxed);
-            anyhow::anyhow!("no backend for tier {:?} (id {})", tier, backend_id)
-        })?;
+        // Try each healthy backend in the tier (least-loaded first).
+        // If the first one fails (e.g., network error), try the next.
+        let candidates = self.tier_backend_candidates(tier);
+        let mut last_err = None;
 
-        let handle = match backend.alloc_page() {
-            Ok(h) => h,
-            Err(e) => {
-                self.stats.store_errors.fetch_add(1, Ordering::Relaxed);
-                return Err(e);
+        for backend_id in &candidates {
+            let backend = match self.backends.get(backend_id) {
+                Some(b) => b,
+                None => continue,
+            };
+
+            let handle = match backend.alloc_page() {
+                Ok(h) => h,
+                Err(e) => {
+                    tracing::debug!(backend_id, error = %e, "alloc_page failed, trying next backend");
+                    last_err = Some(e);
+                    continue;
+                }
+            };
+
+            if let Err(e) = backend.store_page(handle, data) {
+                tracing::debug!(backend_id, error = %e, "store_page failed, trying next backend");
+                let _ = backend.free_page(handle);
+                last_err = Some(e);
+                continue;
             }
-        };
 
-        if let Err(e) = backend.store_page(handle, data) {
-            self.stats.store_errors.fetch_add(1, Ordering::Relaxed);
-            // Try to free the allocated page on failure
-            let _ = backend.free_page(handle);
-            return Err(e);
+            self.policy.record_store(offset, handle, *backend_id, tier);
+            self.stats.pages_stored.fetch_add(1, Ordering::Relaxed);
+            tracing::debug!(offset, %handle, %tier, "page stored");
+            return Ok(handle);
         }
 
-        self.policy.record_store(offset, handle, backend_id, tier);
-        self.stats.pages_stored.fetch_add(1, Ordering::Relaxed);
-
-        tracing::debug!(offset, %handle, %tier, "page stored");
-        Ok(handle)
+        // All candidates failed
+        self.stats.store_errors.fetch_add(1, Ordering::Relaxed);
+        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("no backend for tier {:?}", tier)))
     }
 
     /// Attempt to evict one LRU page from any backend. Returns the evicted offset.
@@ -350,12 +356,10 @@ impl Engine {
         &self.policy
     }
 
-    /// Map a tier to the best available backend ID.
-    /// Uses least-loaded selection to distribute pages fairly across backends
-    /// in the same tier. This ensures balanced utilization even when peers
-    /// have different capacities or different current load.
-    fn tier_to_backend_id(&self, tier: Tier) -> u8 {
-        // Collect all healthy backends with capacity for this tier
+    /// Return all healthy backends with capacity for the given tier, sorted by
+    /// utilization (least-loaded first). Falls back to any healthy backend if
+    /// no exact tier match exists.
+    fn tier_backend_candidates(&self, tier: Tier) -> Vec<u8> {
         let mut candidates: Vec<(u8, f64)> = self
             .backends
             .iter()
@@ -367,69 +371,44 @@ impl Engine {
             })
             .map(|(&id, backend)| {
                 let (total, used) = backend.capacity();
-                let utilization = if total == 0 {
+                let util = if total == 0 {
                     1.0
                 } else {
                     used as f64 / total as f64
                 };
-                (id, utilization)
+                (id, util)
             })
             .collect();
 
-        if !candidates.is_empty() {
-            // Pick the least loaded backend (lowest utilization).
-            // On ties, use round-robin to break the tie fairly.
-            candidates.sort_by(|a, b| {
-                a.1.partial_cmp(&b.1)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| a.0.cmp(&b.0))
-            });
-
-            let min_util = candidates[0].1;
-            // Count how many are tied at the minimum utilization
-            let tied: Vec<u8> = candidates
+        if candidates.is_empty() {
+            // Fallback: any healthy backend with capacity
+            candidates = self
+                .backends
                 .iter()
-                .filter(|(_, u)| (*u - min_util).abs() < 0.001)
-                .map(|(id, _)| *id)
-                .collect();
-
-            if tied.len() > 1 {
-                // Break ties with round-robin
-                let idx = self.round_robin.fetch_add(1, Ordering::Relaxed) % tied.len();
-                return tied[idx];
-            }
-            return candidates[0].0;
-        }
-
-        // No exact tier match — fall back to any healthy backend with capacity
-        // (same least-loaded logic)
-        let mut fallback: Vec<(u8, f64)> = self
-            .backends
-            .iter()
-            .filter(|(_, backend)| {
-                backend.is_healthy() && {
+                .filter(|(_, backend)| {
+                    backend.is_healthy() && {
+                        let (total, used) = backend.capacity();
+                        used < total
+                    }
+                })
+                .map(|(&id, backend)| {
                     let (total, used) = backend.capacity();
-                    used < total
-                }
-            })
-            .map(|(&id, backend)| {
-                let (total, used) = backend.capacity();
-                let utilization = if total == 0 {
-                    1.0
-                } else {
-                    used as f64 / total as f64
-                };
-                (id, utilization)
-            })
-            .collect();
-
-        if !fallback.is_empty() {
-            fallback.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-            return fallback[0].0;
+                    let util = if total == 0 {
+                        1.0
+                    } else {
+                        used as f64 / total as f64
+                    };
+                    (id, util)
+                })
+                .collect();
         }
 
-        // Last resort: return first backend id that exists
-        self.backends.keys().next().copied().unwrap_or(0)
+        candidates.sort_by(|a, b| {
+            a.1.partial_cmp(&b.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        candidates.into_iter().map(|(id, _)| id).collect()
     }
 
     /// Run the daemon: listen for control commands on a Unix socket.
@@ -671,16 +650,18 @@ mod tests {
     }
 
     #[test]
-    fn engine_tier_to_backend_id_fallback() {
+    fn engine_tier_backend_candidates_fallback() {
         let config = DaemonConfig::default();
         let engine = Engine::new(config).unwrap();
 
-        // Should find a backend for Compressed tier
-        let id = engine.tier_to_backend_id(Tier::Compressed);
-        assert!(engine.backends.contains_key(&id));
+        // Should find candidates for Compressed tier
+        let candidates = engine.tier_backend_candidates(Tier::Compressed);
+        assert!(!candidates.is_empty());
+        assert!(engine.backends.contains_key(&candidates[0]));
 
-        // Rdma tier has no backend — should fall back to something available
-        let id = engine.tier_to_backend_id(Tier::Rdma);
-        assert!(engine.backends.contains_key(&id));
+        // Rdma tier has no backend — should fall back to any available
+        let fallback = engine.tier_backend_candidates(Tier::Rdma);
+        assert!(!fallback.is_empty());
+        assert!(engine.backends.contains_key(&fallback[0]));
     }
 }

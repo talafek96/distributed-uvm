@@ -34,6 +34,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 const OP_STORE: u8 = 1;
 const OP_LOAD: u8 = 2;
@@ -70,6 +71,15 @@ struct Args {
     /// because iWARP (SoftiWARP) uses TCP as transport.
     #[arg(long)]
     rdma_port: Option<u16>,
+
+    /// Maximum concurrent TCP connections (0 = unlimited).
+    #[arg(long, default_value = "256")]
+    max_connections: u64,
+
+    /// Idle timeout in seconds for TCP connections (0 = no timeout).
+    /// Connections with no activity for this duration are closed.
+    #[arg(long, default_value = "300")]
+    idle_timeout: u64,
 }
 
 /// Shared page storage. All connections share one pool with one capacity limit.
@@ -182,6 +192,23 @@ fn main() -> Result<()> {
     }
 
     let store = Arc::new(PageStore::new(args.max_pages));
+    let active_conns = Arc::new(AtomicU64::new(0));
+    let max_conns = args.max_connections;
+    let idle_timeout = if args.idle_timeout > 0 {
+        Some(Duration::from_secs(args.idle_timeout))
+    } else {
+        None
+    };
+
+    eprintln!(
+        "  Connection limits: max={}, idle_timeout={}s",
+        if max_conns == 0 {
+            "unlimited".to_string()
+        } else {
+            max_conns.to_string()
+        },
+        args.idle_timeout
+    );
 
     let listener = TcpListener::bind(&args.bind)?;
     eprintln!("  Listening for connections...");
@@ -189,16 +216,34 @@ fn main() -> Result<()> {
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
+                // Enforce connection limit
+                if max_conns > 0 && active_conns.load(Ordering::Relaxed) >= max_conns {
+                    eprintln!(
+                        "  Rejected connection from {:?} (limit: {} active)",
+                        stream.peer_addr().ok(),
+                        max_conns
+                    );
+                    drop(stream);
+                    continue;
+                }
+
                 let peer = stream.peer_addr().ok();
                 eprintln!("  Client connected from {:?}", peer);
                 if let Err(e) = stream.set_nodelay(true) {
                     eprintln!("  Warning: set_nodelay failed: {}", e);
                 }
+                // Set read timeout for idle detection
+                if let Some(timeout) = idle_timeout {
+                    stream.set_read_timeout(Some(timeout)).ok();
+                }
                 let store = store.clone();
+                let conns = active_conns.clone();
+                conns.fetch_add(1, Ordering::Relaxed);
                 std::thread::spawn(move || {
                     if let Err(e) = handle_client(stream, &store) {
                         eprintln!("  Client {:?} disconnected: {}", peer, e);
                     }
+                    conns.fetch_sub(1, Ordering::Relaxed);
                 });
             }
             Err(e) => eprintln!("  Accept error: {}", e),
