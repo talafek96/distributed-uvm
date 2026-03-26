@@ -133,3 +133,11 @@
 **Fix:** Added constants for all system commands with absolute paths (`/sbin/modprobe`, `/usr/bin/systemctl`, etc.).
 **Lesson:** Any tool that calls `check_root()` / runs as root must use absolute paths for all subprocess calls.
 **Commit:** c6c424a
+
+## TCP backend held broken streams forever after server crash
+
+**Symptom:** If the memserver process restarted, the TCP backend reported `is_healthy() == true` but every operation failed. The broken TCP stream was never cleared.
+**Cause:** `is_healthy()` only checked `Option::is_some()`, not whether the stream was actually usable. On I/O error, the broken stream remained in the Mutex — no code ever set it to `None`.
+**Fix:** Replaced `Mutex<Option<TcpStream>>` with a `ConnState` struct that tracks stream + consecutive failure count + last attempt time. `with_stream()` clears the stream on any I/O error and auto-reconnects on the next call. Circuit breaker (5 consecutive failures → 5s backoff) prevents reconnect storms. `is_healthy()` now correctly returns false when disconnected.
+**Lesson:** Network backends must clear broken connections on error, not keep retrying the same dead socket. Health checks must reflect actual connectivity, not just "was ever connected."
+**Commit:** (current)

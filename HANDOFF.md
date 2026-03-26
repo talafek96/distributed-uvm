@@ -18,13 +18,13 @@
 | Two-VM distributed test | VM-A (kmod+daemon) talks to VM-B (memserver), 12/12 | `bash scripts/test-distributed-qemu.sh` |
 | Kernel module standalone | insmod, mkswap, swapon, block I/O, rmmod — 16/16 QEMU | `bash scripts/test-kmod-qemu.sh` |
 | Cross-machine TCP (real hardware) | 10,000 pages calc1↔calc2 over ConnectX-7, byte-perfect | `cargo run --example demo_distributed --release -p duvm-daemon` |
-| Engine + policy + eviction + transport | LRU, tier cascading, transport modes, 192 Rust tests | `cargo test` |
+| Engine + policy + eviction + transport | LRU, tier cascading, transport modes, 196 Rust tests | `cargo test` |
 
 ### Test Summary
 
 | Test | Checks | What it proves |
 |---|---|---|
-| `cargo test` | 192 pass | User-space engine, policy, backends, config, transport modes, TCP capacity |
+| `cargo test` | 196 pass | User-space engine, policy, backends, config, transport modes, TCP capacity, reconnection |
 | `test-kmod-qemu.sh` | 16/16 | Kernel module: load, block I/O, swap, unload |
 | `test-kmod-daemon-qemu.sh` | 10/10 | Ring buffer: kmod → daemon → engine → backend |
 | `test-distributed-qemu.sh` | 12/12 | Two VMs: kmod+daemon on A, memserver on B, network I/O |
@@ -46,7 +46,7 @@ All QEMU tests run in CI (`e2e-kmod` job on `ubuntu-24.04-arm`).
 | **duvm-backend-trait** | Complete | `crates/duvm-backend-trait/` — Backend plugin interface |
 | **duvm-backend-memory** | Complete | `crates/duvm-backend-memory/` — In-memory backend |
 | **duvm-backend-compress** | Complete | `crates/duvm-backend-compress/` — LZ4 compression backend |
-| **duvm-backend-tcp** | Complete | `crates/duvm-backend-tcp/` — TCP remote memory backend |
+| **duvm-backend-tcp** | Complete — reconnection | `crates/duvm-backend-tcp/` — TCP remote memory backend with auto-reconnect + circuit breaker |
 | **duvm-backend-rdma** | Complete — end-to-end verified | `crates/duvm-backend-rdma/` — RDMA (libibverbs + librdmacm) backend + server |
 | **duvm-ctl** | Complete — enable/disable/drain | `crates/duvm-ctl/` — CLI: status, stats, backends, ping, enable, disable, drain |
 | **libduvm** | Complete | `crates/libduvm/` — Rust + C FFI library |
@@ -112,16 +112,14 @@ sudo bash scripts/setup-kmod-for-testing.sh --teardown  # Cleanup
 | Single-page RDMA buffer | Medium | RDMA backend uses one PAGE_SIZE local buffer under a Mutex. All transfers serialized. Need a buffer pool for concurrent RDMA ops. |
 | No real RDMA hardware validation | Important | Only tested with SoftiWARP in QEMU. Need ConnectX-7 RoCEv2 test on DGX Spark. |
 | No RDMA failure path tests | Medium | No tests for connection timeout, rejection, address resolution failure, missing handshake. |
-| No backend reconnection | Medium | TCP backend doesn't clear broken connections or attempt reconnect. Daemon has no retry/circuit-breaker logic. |
 
 ## What's Next
 
 ### Phase 3 — Production validation
 1. **Real RDMA hardware test** — run on DGX Spark ConnectX-7, measure latency vs TCP
-2. **Backend reconnection** — TCP backend clears broken streams, daemon retries with backoff
-3. **Negative test suite** — RDMA timeouts, capacity exhaustion, backend failures
-4. **Prometheus metrics** — expose stats at `metrics_port` for monitoring
-5. **RDMA buffer pool** — replace single-page buffer with lock-free pool for concurrent ops
+2. **Negative test suite** — RDMA timeouts, capacity exhaustion, backend failures
+3. **Prometheus metrics** — expose stats at `metrics_port` for monitoring
+4. **RDMA buffer pool** — replace single-page buffer with lock-free pool for concurrent ops
 
 ## Key Technical Decisions
 

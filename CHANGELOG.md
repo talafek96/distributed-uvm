@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-03-26 — TCP backend reconnection and circuit breaker
+
+- **Auto-reconnect:** TCP backend now clears broken streams on I/O error and automatically reconnects on the next operation. Memserver restarts no longer brick the backend.
+- **Circuit breaker:** After 5 consecutive failures, the backend backs off for 5 seconds before retrying, preventing reconnect storms against a down server.
+- **Accurate health:** `is_healthy()` now returns false when disconnected (was always true if stream was ever set).
+- **Connect timeout:** `init()` and reconnect use `connect_timeout(3s)` instead of blocking indefinitely.
+- Tests: `tcp_server_crash_marks_unhealthy`, `tcp_reconnect_after_server_restart`, `tcp_connect_to_dead_server_is_unhealthy`, `tcp_store_failure_clears_stream_and_reconnects`.
+- Total: 196 unit tests + 81 QEMU checks across 7 test scripts.
+
 ## 2026-03-25 — Phase 1+2 bug fixes and service management
 
 ### Phase 1: Bug fixes
