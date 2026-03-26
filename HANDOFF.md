@@ -65,7 +65,7 @@ All QEMU tests run in CI (`e2e-kmod` job on `ubuntu-24.04-arm`).
 cargo build --release
 make -C duvm-kmod
 
-# Run Rust tests (189 tests, no sudo needed)
+# Run Rust tests (196 tests, no sudo needed)
 cargo test
 
 # QEMU tests (no sudo needed)
@@ -107,19 +107,81 @@ sudo bash scripts/setup-kmod-for-testing.sh --teardown  # Cleanup
 
 ### Remaining gaps
 
+#### Security (Critical for production)
+
 | Gap | Severity | Detail |
 |---|---|---|
-| Single-page RDMA buffer | Medium | RDMA backend uses one PAGE_SIZE local buffer under a Mutex. All transfers serialized. Need a buffer pool for concurrent RDMA ops. |
-| No real RDMA hardware validation | Important | Only tested with SoftiWARP in QEMU. Need ConnectX-7 RoCEv2 test on DGX Spark. |
-| No RDMA failure path tests | Medium | No tests for connection timeout, rejection, address resolution failure, missing handshake. |
+| No authentication | Critical | TCP/RDMA connections have no auth. Anyone who can reach port 9200 can read/write any page. DECISIONS.md says "trusted network" — insufficient for multi-tenant or cloud. |
+| No encryption | Critical | Pages transmitted in plaintext over TCP. Sensitive application data exposed on the wire. |
+| Memserver accepts any client | High | No ACL, no connection allow-list. No way to restrict which machines can store/load pages. |
+
+#### Cluster management (Critical for multi-node)
+
+| Gap | Severity | Detail |
+|---|---|---|
+| Static peer config only | High | Peers must be listed in `duvm.toml` before daemon starts. Adding a node requires editing config + restarting daemon on every existing node. |
+| No peer discovery | High | No integration with etcd/consul/DNS-SD. Each node must be manually configured to know about every other node. |
+| No config reload | Medium | `duvm-daemon.service` has `ExecReload=/bin/kill -HUP $MAINPID` but daemon doesn't handle SIGHUP. Config changes require full restart. |
+| No runtime peer add/remove | Medium | No `duvm-ctl add-peer` or `remove-peer` commands. Daemon socket only supports status/stats/backends/ping. |
+| No cluster health monitoring | Medium | No periodic health checks on remote peers. Backend health only checked at page allocation time. |
+
+#### Resilience
+
+| Gap | Severity | Detail |
+|---|---|---|
+| RDMA backend has no reconnection | High | Unlike TCP (which now auto-reconnects), RDMA connection drop is permanent. `is_healthy()` only checks init state, doesn't detect broken connections. |
+| Engine has no retry/fallback | Medium | If selected backend's `store_page`/`load_page` fails, daemon returns error immediately — doesn't try another backend of the same tier. |
+| Daemon shutdown doesn't drain pages | Medium | `Ctrl+C` / SIGTERM calls `backend.shutdown()` but doesn't run `swapoff` first. Remote pages are abandoned. Operator must run `duvm-ctl drain` manually before stopping. |
+| Memserver has no connection limits | Medium | Unbounded `thread::spawn` per client. No max connections, no idle timeout, no per-client page limits. DoS risk. |
+
+#### Performance
+
+| Gap | Severity | Detail |
+|---|---|---|
+| Single-page RDMA buffer | Medium | RDMA backend holds Mutex for entire transfer (including 5s timeout). All RDMA ops serialized. Need buffer pool. |
+| No real RDMA hardware validation | Important | Only tested with SoftiWARP in QEMU. ConnectX-7 RoCEv2 on DGX Spark available but untested. |
+
+#### Observability
+
+| Gap | Severity | Detail |
+|---|---|---|
+| Prometheus metrics not implemented | Medium | Config has `metrics_port: 9100` but nothing listens on it. Stats exist in `DaemonStats` but only accessible via Unix socket. |
+
+#### Test coverage
+
+| Gap | Severity | Detail |
+|---|---|---|
+| `test-distributed-qemu.sh` doesn't test TCP path | High | Uses local memory backend, only checks TCP connectivity with `nc`. Pages don't actually flow kmod → daemon → TCP → memserver. |
+| `test-3machine-qemu.sh` doesn't verify distribution | Medium | Writes pages and reads them back, but doesn't check that pages actually went to different peers (B and C). |
+| No `duvm-ctl enable/disable` integration test | Medium | These commands are untested end-to-end. |
+| No daemon crash recovery test | Medium | No test for: daemon dies mid-request → kmod doesn't hang → kernel falls back. |
+| No multi-peer failover test | Medium | No test for: peer A dies → new pages route to peer B → no hang. |
+| No RDMA negative tests | Medium | No tests for RDMA connection timeout, rejection, address resolution failure. |
 
 ## What's Next
 
-### Phase 3 — Production validation
-1. **Real RDMA hardware test** — run on DGX Spark ConnectX-7, measure latency vs TCP
-2. **Negative test suite** — RDMA timeouts, capacity exhaustion, backend failures
-3. **Prometheus metrics** — expose stats at `metrics_port` for monitoring
-4. **RDMA buffer pool** — replace single-page buffer with lock-free pool for concurrent ops
+### Phase 3 — Production hardening (no hardware needed)
+
+1. **Fix `test-distributed-qemu.sh`** — configure TCP backend in daemon so pages actually flow kmod → daemon → TCP → memserver → verify data integrity. Highest-impact test gap.
+2. **Engine retry/fallback** — when `store_page` fails on one backend, try the next healthy backend of the same tier before returning error to kernel.
+3. **Prometheus metrics** — HTTP listener on `metrics_port` exposing `DaemonStats` + backend health in Prometheus exposition format.
+4. **SIGHUP config reload** — daemon re-reads `duvm.toml` on SIGHUP, adds/removes backends for new/removed peers without full restart.
+5. **Memserver connection limits** — max connections, idle timeout, per-client page quota.
+6. **RDMA reconnection** — port the TCP auto-reconnect + circuit breaker pattern to RDMA backend.
+
+### Phase 4 — Production validation (needs hardware)
+
+1. **Real RDMA hardware test** — ConnectX-7 RoCEv2 on DGX Spark, measure latency vs TCP.
+2. **RDMA buffer pool** — replace single-page Mutex buffer with lock-free pool for concurrent ops.
+3. **Multi-peer failover QEMU test** — 3 VMs, kill one peer mid-operation, verify traffic reroutes.
+4. **Daemon crash recovery QEMU test** — kill daemon mid-request, verify kmod timeout + kernel fallback.
+
+### Phase 5 — Cluster management (design needed)
+
+1. **Peer discovery** — etcd/consul/DNS-SD integration or simple multicast.
+2. **Runtime peer add/remove** — `duvm-ctl add-peer` / `remove-peer` + daemon socket commands.
+3. **TLS + auth** — mutual TLS for TCP, token-based auth for RDMA private data.
+4. **Page migration on peer leave** — drain pages from departing node to remaining nodes.
 
 ## Key Technical Decisions
 

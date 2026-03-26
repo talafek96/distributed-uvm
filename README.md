@@ -62,7 +62,7 @@ make kmod
 ### Test
 
 ```bash
-# Run all tests (42 tests: unit + integration)
+# Run all tests (196 tests: unit + integration)
 make test
 
 # Run with verbose output
@@ -318,7 +318,7 @@ Each level degrades performance, never correctness.
 make help           # Show all targets
 make build          # Build (debug)
 make release        # Build (optimized)
-make test           # Run all 54 tests
+make test           # Run all 196 tests
 make clippy         # Lint with clippy
 make fmt            # Format code
 make check          # format + lint + test
