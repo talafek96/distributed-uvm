@@ -205,15 +205,21 @@ impl RdmaMemServer {
 
         let buf_size = self.max_pages as usize * PAGE_SIZE;
 
-        // Allocate virtual address range but don't commit physical pages.
-        // Pages will be faulted in by ibv_reg_mr (which pins them).
-        // We register per-slab MRs to pin only the memory actually used.
+        // Allocate and populate the full buffer. RDMA requires pinned physical
+        // pages for reliable one-sided WRITE/READ.
+        //
+        // ODP (On-Demand Paging) was attempted but fails under rapid sequential
+        // writes: the NIC's ODP fault handler can't keep up with thousands of
+        // page faults per second, causing IBV_WC_TRANSPORT_RETRY_COUNTER_EXCEEDED.
+        //
+        // To avoid wasting memory, configure --max-pages to match expected usage
+        // rather than setting a huge upper bound.
         let buf = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
                 buf_size,
                 libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_POPULATE,
                 -1,
                 0,
             )
@@ -223,17 +229,6 @@ impl RdmaMemServer {
             bail!("mmap for RDMA buffer failed ({} bytes)", buf_size);
         }
 
-        // Populate and pin only a small initial region (first client's worth).
-        // The rest will be demand-faulted when the NIC writes to it.
-        // We use a single MR with ON_DEMAND so new slabs are automatically
-        // faulted and pinned by the NIC on first RDMA WRITE.
-        //
-        // On ConnectX-7, ODP handles page faults in hardware — pages are
-        // physically allocated on first DMA access. This means memory on
-        // calc1 grows as pages arrive from calc2, but the pages are managed
-        // by the RDMA subsystem rather than the standard Linux VM (so they
-        // don't appear in VmRSS or MemFree, but they ARE in physical RAM —
-        // proven by readback verification with 0 errors).
         let mr = unsafe {
             ffi::ibv_reg_mr(
                 pd,
@@ -241,8 +236,7 @@ impl RdmaMemServer {
                 buf_size,
                 ffi::IBV_ACCESS_LOCAL_WRITE
                     | ffi::IBV_ACCESS_REMOTE_WRITE
-                    | ffi::IBV_ACCESS_REMOTE_READ
-                    | ffi::IBV_ACCESS_ON_DEMAND,
+                    | ffi::IBV_ACCESS_REMOTE_READ,
             )
         };
         if mr.is_null() {
@@ -255,7 +249,7 @@ impl RdmaMemServer {
 
         let rkey = unsafe { (*mr).rkey };
         eprintln!(
-            "  RDMA server: capacity={} pages ({:.1} MB), rkey=0x{:08x}, addr=0x{:x} [ODP — memory allocated on demand]",
+            "  RDMA server: buffer={} pages ({:.1} MB), rkey=0x{:08x}, addr=0x{:x}",
             self.max_pages,
             buf_size as f64 / 1e6,
             rkey,
