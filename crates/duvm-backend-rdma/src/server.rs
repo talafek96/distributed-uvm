@@ -103,6 +103,9 @@ impl RdmaMemServer {
         // Track per-connection CQs so we can destroy them on disconnect.
         // Key: conn_id pointer as usize, Value: CQ pointer.
         let mut conn_cqs: HashMap<usize, *mut ffi::ibv_cq> = HashMap::new();
+        // Track per-connection slab addresses for DONTNEED on disconnect.
+        // Key: conn_id pointer as usize, Value: (slab_addr, slab_size).
+        let mut conn_slabs: HashMap<usize, (u64, usize)> = HashMap::new();
 
         // Event loop
         while self.running.load(Ordering::Relaxed) {
@@ -140,8 +143,9 @@ impl RdmaMemServer {
 
                     if let Some(ref res) = resources {
                         match self.handle_connect(res, conn_id, &next_client_offset) {
-                            Ok(cq) => {
+                            Ok((cq, slab_addr, slab_size)) => {
                                 conn_cqs.insert(conn_id as usize, cq);
+                                conn_slabs.insert(conn_id as usize, (slab_addr, slab_size));
                             }
                             Err(e) => {
                                 eprintln!("  RDMA: connect failed: {}", e);
@@ -154,6 +158,20 @@ impl RdmaMemServer {
                 }
                 ffi::RDMA_CM_EVENT_DISCONNECTED => {
                     eprintln!("  RDMA: client disconnected");
+                    // Release physical pages for this client's slab
+                    if let Some((slab_addr, slab_size)) = conn_slabs.remove(&(conn_id as usize)) {
+                        unsafe {
+                            libc::madvise(
+                                slab_addr as *mut libc::c_void,
+                                slab_size,
+                                libc::MADV_DONTNEED,
+                            );
+                        }
+                        eprintln!(
+                            "  RDMA: released {:.1} MB of physical memory",
+                            slab_size as f64 / 1e6
+                        );
+                    }
                     unsafe {
                         ffi::rdma_disconnect(conn_id);
                         // Destroy the per-connection CQ before destroying the ID
@@ -205,21 +223,20 @@ impl RdmaMemServer {
 
         let buf_size = self.max_pages as usize * PAGE_SIZE;
 
-        // Allocate and populate the full buffer. RDMA requires pinned physical
-        // pages for reliable one-sided WRITE/READ.
+        // Reserve virtual address space without committing physical pages.
+        // Physical pages are committed per-client-slab in handle_connect()
+        // via MADV_POPULATE_WRITE, and released via MADV_DONTNEED.
         //
-        // ODP (On-Demand Paging) was attempted but fails under rapid sequential
-        // writes: the NIC's ODP fault handler can't keep up with thousands of
-        // page faults per second, causing IBV_WC_TRANSPORT_RETRY_COUNTER_EXCEEDED.
-        //
-        // To avoid wasting memory, configure --max-pages to match expected usage
-        // rather than setting a huge upper bound.
+        // ODP (ON_DEMAND) lets us register one MR for the full virtual range
+        // while only pinning the slabs that are actually populated. The NIC
+        // never hits an ODP page fault because we pre-fault from the CPU
+        // before telling the client to write.
         let buf = unsafe {
             libc::mmap(
                 std::ptr::null_mut(),
                 buf_size,
                 libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_POPULATE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
                 -1,
                 0,
             )
@@ -236,7 +253,8 @@ impl RdmaMemServer {
                 buf_size,
                 ffi::IBV_ACCESS_LOCAL_WRITE
                     | ffi::IBV_ACCESS_REMOTE_WRITE
-                    | ffi::IBV_ACCESS_REMOTE_READ,
+                    | ffi::IBV_ACCESS_REMOTE_READ
+                    | ffi::IBV_ACCESS_ON_DEMAND,
             )
         };
         if mr.is_null() {
@@ -249,7 +267,7 @@ impl RdmaMemServer {
 
         let rkey = unsafe { (*mr).rkey };
         eprintln!(
-            "  RDMA server: buffer={} pages ({:.1} MB), rkey=0x{:08x}, addr=0x{:x}",
+            "  RDMA server: capacity={} pages ({:.1} MB), rkey=0x{:08x}, addr=0x{:x} [dynamic: memory allocated per-client]",
             self.max_pages,
             buf_size as f64 / 1e6,
             rkey,
@@ -270,7 +288,7 @@ impl RdmaMemServer {
         res: &ServerResources,
         conn_id: *mut ffi::rdma_cm_id,
         next_client_offset: &AtomicU64,
-    ) -> Result<*mut ffi::ibv_cq> {
+    ) -> Result<(*mut ffi::ibv_cq, u64, usize)> {
         let client_offset_pages =
             next_client_offset.fetch_add(self.pages_per_client, Ordering::Relaxed);
         if client_offset_pages + self.pages_per_client > self.max_pages {
@@ -284,6 +302,23 @@ impl RdmaMemServer {
 
         let client_addr = unsafe { res.buf.add(client_offset_pages as usize * PAGE_SIZE) } as u64;
         let client_size = self.pages_per_client * PAGE_SIZE as u64;
+
+        // Pre-fault this client's slab from the CPU side.
+        // This commits physical pages so the NIC finds them resident on RDMA WRITE.
+        // Without this, ODP page faults from the NIC fail under rapid writes.
+        eprintln!(
+            "  RDMA: populating {} pages ({:.1} MB) for new client...",
+            self.pages_per_client,
+            client_size as f64 / 1e6
+        );
+        unsafe {
+            libc::madvise(
+                client_addr as *mut libc::c_void,
+                client_size as usize,
+                libc::MADV_POPULATE_WRITE,
+            );
+        }
+        eprintln!("  RDMA: slab populated");
 
         // Create CQ for this connection
         let verbs = unsafe { (*conn_id).verbs };
@@ -352,7 +387,7 @@ impl RdmaMemServer {
             res.rkey
         );
 
-        Ok(cq)
+        Ok((cq, client_addr, client_size as usize))
     }
 
     pub fn stop(&self) {
