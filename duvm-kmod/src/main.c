@@ -332,8 +332,31 @@ static blk_status_t duvm_queue_rq(struct blk_mq_hw_ctx *hctx,
     return BLK_STS_OK;
 }
 
+/*
+ * blk-mq timeout handler: called when a request has been in-flight longer
+ * than tag_set.timeout (5 seconds). This catches the case where the daemon
+ * dies or is killed (e.g., by the OOM killer) while requests are in-flight.
+ * Without this, orphaned requests would hang forever.
+ */
+static enum blk_eh_timer_return duvm_timeout(struct request *rq)
+{
+    struct duvm_cmd *cmd = blk_mq_rq_to_pdu(rq);
+
+    pr_warn_ratelimited("duvm: request timed out (seq=%u, %s, slot=%u)\n",
+                         cmd->seq,
+                         cmd->is_read ? "LOAD" : "STORE",
+                         cmd->staging_slot);
+
+    /* Free the staging slot so it can be reused */
+    duvm_free_staging_slot(&duvm_dev.ring, cmd->staging_slot);
+
+    /* Tell blk-mq to fail this request — kernel will try next swap device */
+    return BLK_EH_DONE;
+}
+
 static const struct blk_mq_ops duvm_mq_ops = {
     .queue_rq = duvm_queue_rq,
+    .timeout  = duvm_timeout,
 };
 
 /*
@@ -490,6 +513,7 @@ static int __init duvm_init(void)
     duvm_dev.tag_set.numa_node = NUMA_NO_NODE;
     duvm_dev.tag_set.cmd_size = sizeof(struct duvm_cmd);
     duvm_dev.tag_set.flags = 0;
+    duvm_dev.tag_set.timeout = 5 * HZ;  /* 5 second timeout per request */
 
     ret = blk_mq_alloc_tag_set(&duvm_dev.tag_set);
     if (ret) {

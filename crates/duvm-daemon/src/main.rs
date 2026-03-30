@@ -45,6 +45,16 @@ async fn main() -> Result<()> {
 
     tracing::info!("duvm-daemon starting");
 
+    // Protect daemon from OOM killer — if the daemon dies while serving
+    // swap I/O, in-flight requests timeout and the kernel falls back,
+    // but it's much better to keep the daemon alive.
+    if let Err(e) = std::fs::write("/proc/self/oom_score_adj", "-999") {
+        tracing::warn!(
+            "Could not set OOM score (run as root or set in systemd): {}",
+            e
+        );
+    }
+
     let mut config = config::DaemonConfig::load_or_default(&args.config);
 
     // Apply CLI overrides (CLI args take precedence over config file)
