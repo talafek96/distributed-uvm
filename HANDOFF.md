@@ -13,6 +13,7 @@
 | What | Evidence | Command |
 |---|---|---|
 | **Enable/disable service** | `duvm-ctl enable/disable/drain` manage full lifecycle | `sudo duvm-ctl enable` / `sudo duvm-ctl disable` |
+| **RDMA on real hardware** | 10,000 pages via ConnectX-7 RoCEv2, 15μs/page, 0 errors | `cargo run --release --example demo_rdma -p duvm-daemon` |
 | RDMA end-to-end (SoftiWARP) | Two VMs: daemon → RDMA WRITE → memserver MR, 18/18 | `bash scripts/test-rdma-qemu.sh` |
 | Kernel module ↔ daemon ring buffer | Pages flow kmod → ring → daemon → backend, 10/10 QEMU | `bash scripts/test-kmod-daemon-qemu.sh` |
 | Two-VM distributed test | VM-A (kmod+daemon) talks to VM-B (memserver), 12/12 | `bash scripts/test-distributed-qemu.sh` |
@@ -136,8 +137,7 @@ sudo bash scripts/setup-kmod-for-testing.sh --teardown  # Cleanup
 
 | Gap | Severity | Detail |
 |---|---|---|
-| Single-page RDMA buffer | Medium | RDMA backend holds Mutex for entire transfer (including 5s timeout). All RDMA ops serialized. Need buffer pool. |
-| No real RDMA hardware validation | Important | Only tested with SoftiWARP in QEMU. ConnectX-7 RoCEv2 on DGX Spark available but untested. |
+| Single-page RDMA buffer | Medium | RDMA backend holds Mutex for entire transfer (including 5s timeout). All RDMA ops serialized. Measured 15μs/page on ConnectX-7 vs <1μs raw — buffer pool would close the gap. |
 
 #### Observability
 

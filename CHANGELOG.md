@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026-03-30 — RDMA hardware validation on ConnectX-7
+
+- **Fixed IBV_SEND_SIGNALED** (was `1<<2`=4, correct `1<<1`=2) and **IBV_WR_RDMA_READ** (was 3, correct 4). SoftiWARP was lenient; real ConnectX-7 hardware is strict — WRITE completions never arrived.
+- **RDMA hardware test: PASS.** 10,000 pages via one-sided RDMA WRITE/READ on ConnectX-7 RoCEv2 (200Gbps), zero errors, 15μs/page, 273 MB/s. Compared to TCP: 6.8x lower latency, 11.2x higher throughput.
+- Added `demo_rdma.rs` test binary for hardware validation.
+
 ## 2026-03-26 — Engine retry, distributed TCP test, memserver hardening
 
 - **Engine store retry/fallback:** `store_page` now tries all healthy backends in the tier (least-loaded first) before returning an error. If the first backend fails (e.g., network error), the next one is attempted. Replaced `tier_to_backend_id` (single pick) with `tier_backend_candidates` (ranked list).

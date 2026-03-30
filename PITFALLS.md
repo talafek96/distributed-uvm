@@ -149,3 +149,11 @@
 **Fix:** Removed the fragile log-grep check. Data integrity (write 'D', read 'D') already proves pages flowed correctly — a log check adds nothing.
 **Lesson:** Don't assert on internal log messages in e2e tests. Assert on observable outcomes (data integrity, response codes).
 **Commit:** 6f25a70
+
+## RDMA FFI constants wrong — WRITE timed out on real hardware
+
+**Symptom:** RDMA connection to ConnectX-7 succeeds, `ibv_post_send` returns 0, but CQ completion never arrives — WRITE times out after 5s. Same code works on SoftiWARP.
+**Cause:** Two wrong constants in `ffi.rs`: `IBV_SEND_SIGNALED` was `1<<2` (=4, actually `IBV_SEND_SOLICITED`), should be `1<<1` (=2). `IBV_WR_RDMA_READ` was 3, should be 4 (the C enum has `SEND_WITH_IMM=3` in between). SoftiWARP is lenient with flags; real hardware is strict.
+**Fix:** Corrected both constants. Verified with a C test program that printed the actual enum values.
+**Lesson:** Never hand-write FFI enum values. Always verify against `sizeof`/`offsetof`/enum value C test programs. Add a compile-time assertion or build.rs check.
+**Commit:** 08e2a19
