@@ -164,3 +164,11 @@
 **Cause:** Secure Boot is enabled. Unsigned kernel modules are rejected.
 **Fix:** Disabled Secure Boot on calc2 via `mokutil --disable-validation` + reboot + UEFI enrollment. Alternative: sign the module with a MOK key (one-time reboot to enroll, then sign modules without rebooting).
 **Lesson:** Check `mokutil --sb-state` before attempting insmod on new machines.
+
+## Full-stack swap test freezes machine under memory pressure
+
+**Symptom:** Allocating memory beyond available RAM to force swap through duvm_swap0 causes the entire machine to freeze. `free -h`, SSH, everything hangs. Requires hard power cycle. Happened twice on DGX Spark (128GB RAM).
+**Cause:** The kmod ring buffer is only 256 entries. When the kernel's memory reclaim tries to swap out hundreds of pages simultaneously, the ring fills up. `duvm_ring_submit_and_wait()` blocks in kernel context with a 500ms timeout per page. The RDMA backend is serialized behind a single-page Mutex, so it can only process one page at a time (~15μs per page = ~65k pages/sec max). Under heavy pressure, the kernel's reclaim stalls waiting for our device, which stalls everything.
+**Fix:** NOT YET FIXED. Requires: (1) larger ring buffer (256 → 4096+), (2) RDMA buffer pool for concurrent transfers, (3) possibly `BLK_STS_AGAIN` when ring is full instead of blocking. The direct RDMA test (`demo_rdma.rs`) works because it doesn't go through the kmod/ring — it calls the backend directly.
+**Lesson:** Do NOT run memory pressure tests against the full kmod stack until the ring/buffer pool performance work is done. The direct backend test (`demo_rdma.rs`, `demo_distributed.rs`) is sufficient for validating RDMA correctness. SSH escape sequence `~.` force-disconnects a stuck SSH session.
+**Workaround for stuck SSH:** Type `Enter` then `~.` to force-disconnect from a frozen remote host.

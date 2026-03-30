@@ -137,7 +137,8 @@ sudo bash scripts/setup-kmod-for-testing.sh --teardown  # Cleanup
 
 | Gap | Severity | Detail |
 |---|---|---|
-| Single-page RDMA buffer | Medium | RDMA backend holds Mutex for entire transfer (including 5s timeout). All RDMA ops serialized. Measured 15μs/page on ConnectX-7 vs <1μs raw — buffer pool would close the gap. |
+| **Ring buffer too small for real swap pressure** | **Critical** | 256-entry ring + serialized RDMA Mutex = machine freeze under memory pressure. Kernel reclaim blocks in `submit_and_wait`. Requires: ring 4096+, RDMA buffer pool, possibly `BLK_STS_AGAIN` on ring full. |
+| Single-page RDMA buffer | High | RDMA backend holds Mutex for entire transfer. All RDMA ops serialized. Measured 15μs/page on ConnectX-7 vs <1μs raw. |
 
 #### Observability
 
