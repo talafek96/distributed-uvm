@@ -20,9 +20,9 @@ pub const IBV_QPS_RTR: c_int = 2;
 pub const IBV_QPS_RTS: c_int = 3;
 
 pub const IBV_WR_RDMA_WRITE: c_int = 0;
-pub const IBV_WR_RDMA_READ: c_int = 3;
+pub const IBV_WR_RDMA_READ: c_int = 4;
 
-pub const IBV_SEND_SIGNALED: c_int = 1 << 2;
+pub const IBV_SEND_SIGNALED: c_int = 1 << 1;
 
 pub const IBV_WC_SUCCESS: c_int = 0;
 

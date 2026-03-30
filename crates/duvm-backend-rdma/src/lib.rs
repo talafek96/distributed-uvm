@@ -180,9 +180,10 @@ impl RdmaBackend {
             if n > 0 {
                 if wc.status != ffi::IBV_WC_SUCCESS {
                     bail!(
-                        "RDMA {} failed: status={}",
+                        "RDMA {} failed: status={} (vendor_err={})",
                         if is_write { "WRITE" } else { "READ" },
-                        wc.status
+                        wc.status,
+                        wc.vendor_err,
                     );
                 }
                 return Ok(());
