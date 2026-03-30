@@ -111,11 +111,19 @@ static blk_status_t duvm_queue_rq(struct blk_mq_hw_ctx *hctx,
             ret = duvm_ring_submit_and_wait(&duvm_dev.ring, &req,
                                              &comp, 500);
             if (ret) {
+                if (ret == -EAGAIN) {
+                    /*
+                     * Ring is full — daemon can't keep up.
+                     * Tell blk-mq to requeue and retry later.
+                     * This prevents the kernel from blocking
+                     * in memory reclaim waiting for our device.
+                     */
+                    blk_mq_end_request(rq, BLK_STS_RESOURCE);
+                    return BLK_STS_OK;
+                }
                 /*
-                 * Ring submit failed (timeout, daemon dead, ring full).
+                 * Timeout, daemon dead, or other error.
                  * Return I/O error so the kernel tries the next swap device.
-                 * Do NOT fall back to xarray — that would hide the failure
-                 * and prevent the kernel from using local SSD swap.
                  */
                 pr_warn_ratelimited("duvm: ring failed (%d) for %s at offset %lu\n",
                                      ret, is_write ? "STORE" : "LOAD", idx);
