@@ -184,3 +184,18 @@
 **Proof:** duvm_swap0 showed 782MB used before the freeze. The async path works. The freeze is a platform-level UMA issue, not a duvm issue.
 **Workaround:** Set a higher safety threshold in test programs — check MemFree > 4GB (not MemAvailable > 6GB). Drop page cache before the test (`echo 3 > /proc/sys/vm/drop_caches`). Don't push memory below ~2GB MemFree on DGX Spark.
 **Lesson:** On UMA systems, MemAvailable is misleading — it includes reclaimable cache that the GPU driver may not be able to wait for. Check MemFree for safety limits.
+
+## ODP page faults fail under rapid sequential RDMA WRITEs on ConnectX-7
+
+**Symptom:** Pure ODP (MAP_NORESERVE + IBV_ACCESS_ON_DEMAND, no pre-fault) gives `IBV_WC_TRANSPORT_RETRY_COUNTER_EXCEEDED` (status=13, vendor_err=135) after the first few writes. Only ~1 WRITE succeeds, the rest time out.
+**Cause:** The NIC's ODP fault handler can't keep up with thousands of rapid sequential page faults. Each fault requires kernel intervention to allocate and pin a physical page. The default QP timeout (~67ms × 7 retries = ~470ms) expires before the fault completes.
+**Fix:** Increased QP timeout via `duvm_set_qp_timeout(qp, 21, 7)` in shim.c — 8.6s per retry × 7 = ~60s total. ODP then works but at ~100μs/page (vs 15μs for pre-faulted pages). Throughput drops from 274 MB/s to ~64 MB/s.
+**Better fix:** CPU pre-fault slabs via `MADV_POPULATE_WRITE` before NIC writes. Pages are resident, NIC never faults, full 15μs/page speed. Combine with `MADV_DONTNEED` to release on disconnect.
+**Lesson:** ODP is for sparse/random access patterns. For sequential bulk writes (like swap), pre-fault from CPU is mandatory for performance. ODP pages also don't appear in VmRSS/MemFree — the RDMA subsystem manages them outside Linux VM accounting.
+
+## vm.swappiness=100 alone doesn't trigger swap on DGX Spark
+
+**Symptom:** Allocated 61GB on a 119GB machine with vm.swappiness=100 and duvm_swap0 active at priority 100. MemFree dropped to 4GB. duvm_swap0 used: 0KB. No pages swapped.
+**Cause:** All allocated pages were recently touched (the test writes every page in sequence). The kernel considers them "active" in the LRU and won't swap them even with swappiness=100, because there's still reclaimable page cache.
+**Fix:** Use `MADV_COLD` to mark pages as cold in the LRU, then `MADV_PAGEOUT` to explicitly force them to swap. `MADV_PAGEOUT` (Linux 5.4+) tells the kernel to page out specific ranges to the swap device.
+**Lesson:** To test swap on a system with plenty of free memory, you must explicitly hint pages as cold. Normal allocation + touch won't trigger swap until MemFree is nearly zero.

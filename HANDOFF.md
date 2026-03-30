@@ -6,7 +6,7 @@
 
 ## Current State
 
-**FULL-STACK SWAP PROVEN ON REAL HARDWARE. 4GB swapped through kmod→daemon→RDMA→memserver on ConnectX-7, 14.6M pages verified, zero errors. System stayed alive.**
+**Full-stack swap proven on real hardware (4GB, 14.6M pages, 0 errors). Dynamic RDMA memory allocation in progress — ODP + CPU pre-fault works but needs the slab-based grow/shrink design implemented.**
 
 ### What Works (Proven)
 
@@ -15,171 +15,192 @@
 | **Full-stack swap PROVEN** | 4GB (14.6M pages) swapped through kmod→daemon→RDMA→memserver, 0 errors, system stable | `MADV_PAGEOUT` test on calc2→calc1 |
 | **RDMA on real hardware** | 10,000 pages via ConnectX-7 RoCEv2, 15μs/page, 0 errors | `cargo run --release --example demo_rdma -p duvm-daemon` |
 | **Async kmod I/O** | queue_rq never blocks; completion harvester thread + 5s blk-mq timeout | All QEMU tests pass in CI |
+| **Dynamic RDMA memory (partial)** | ODP + CPU pre-fault: RSS grows from 4MB→20GB on connect, DONTNEED releases on disconnect | Tested, works but pre-faults full slab at once |
 | TCP on real hardware | 10,000 pages calc1↔calc2 over ConnectX-7, 102μs/page, byte-perfect | `cargo run --example demo_distributed --release -p duvm-daemon` |
 | Enable/disable service | `duvm-ctl enable/disable/drain` manage full lifecycle | `sudo duvm-ctl enable` / `sudo duvm-ctl disable` |
-| RDMA end-to-end (SoftiWARP) | Two VMs: daemon → RDMA WRITE → memserver MR, 18/18 | `bash scripts/test-rdma-qemu.sh` |
 | Full distributed TCP path | kmod→daemon→TCP→memserver on B, data integrity verified, 13/13 | `bash scripts/test-distributed-qemu.sh` |
 | Engine + policy + eviction | LRU, tier cascading, backend retry/fallback, 196 Rust tests | `cargo test` |
 
 ### Performance (measured on ConnectX-7 RoCEv2)
 
-| Metric | TCP | RDMA | Improvement |
-|---|---|---|---|
-| Store latency | 102 μs/page | 15 μs/page | 6.8x |
-| Load latency | 98 μs/page | 15 μs/page | 6.4x |
-| Store throughput | 24 MB/s | 274 MB/s | 11.2x |
-| Load throughput | 42 MB/s | 267 MB/s | 6.4x |
+| Metric | TCP | RDMA (pre-faulted) | RDMA (ODP) | Hardware limit |
+|---|---|---|---|---|
+| Store latency | 102 μs/page | 15 μs/page | ~100 μs/page | <1 μs/page |
+| Throughput | 24 MB/s | 274 MB/s | ~64 MB/s | **~23 GB/s** (190 Gbps) |
 
-### Test Summary
-
-| Test | Checks | What it proves |
-|---|---|---|
-| `cargo test` | 196 pass | User-space engine, policy, backends, config, transport, reconnection |
-| `test-kmod-qemu.sh` | 16/16 | Kernel module: load, block I/O, swap, unload |
-| `test-kmod-daemon-qemu.sh` | 10/10 | Ring buffer: kmod → daemon → engine → backend |
-| `test-distributed-qemu.sh` | 13/13 | Two VMs: kmod+daemon→TCP→memserver, data integrity |
-| `test-mutual-oom-qemu.sh` | 9/9 | Mutual OOM degradation, graceful fallback |
-| `test-3machine-qemu.sh` | 10/10 | Three VMs: fair distribution, exhaustion handling |
-| `test-rdma-qemu.sh` | 18/18 | Full RDMA: SoftiWARP, CM handshake, WRITE/READ |
-| `test-memserver-concurrent-qemu.sh` | 6/6 | Concurrent TCP clients, capacity enforcement |
-
-All QEMU tests run in CI (`e2e-kmod` job on `ubuntu-24.04-arm`). All green.
+**We are using 1.2% of available bandwidth.** See "Immediate Next Step" for the fix.
 
 ### Hardware
 
-- **calc1** (192.168.200.10): DGX Spark, 128GB, Secure Boot ON — used as memserver
-- **calc2** (192.168.200.11): DGX Spark, 128GB, Secure Boot OFF — used as compute node (kmod + daemon)
-- 4x ConnectX-7 200Gbps RoCE (device names: `rocep1s0f0` etc, not `mlx5_*`)
+- **calc1** (192.168.200.10, also .12): DGX Spark, 128GB, Secure Boot ON — used as memserver
+- **calc2** (192.168.200.11, also .13): DGX Spark, 128GB, Secure Boot OFF — used as compute node
+- **4x ConnectX-7 100Gbps RoCE** — two QSFP links active:
+  - `rocep1s0f0` → `enp1s0f0np0` (Up) — subnet 192.168.200.x
+  - `roceP2p1s0f0` → `enP2p1s0f0np0` (Up) — subnet 192.168.201.x (NOT USED YET)
+- Combined bandwidth: **~190 Gbps** (92 + 97 per NVIDIA benchmarks)
 - aarch64, Linux 6.17.0-1008-nvidia, CUDA 13.0
 - Memory guard: `memory-watchdog` + `earlyoom` installed (must be stopped for swap testing)
+
+## Immediate Next Step: Dynamic RDMA Memory + Performance
+
+### The Problem
+
+The RDMA memserver must dynamically borrow memory from calc1 — grow when calc2 needs it, shrink when done. We tried three approaches:
+
+1. **MAP_POPULATE (pre-allocate all)**: Works, fast (15μs/page), but wastes memory. If `--max-pages=10M` (40GB), 40GB is pinned immediately whether used or not. **Unacceptable** — calc1 has its own workloads.
+
+2. **Pure ODP (demand-page via NIC)**: Zero pre-allocation, RSS grows dynamically. But NIC ODP page faults are slow (~100μs/page vs 15μs pre-faulted) and fail with `IBV_WC_TRANSPORT_RETRY_COUNTER_EXCEEDED` under rapid sequential writes. Fixed with longer QP timeout (`set_qp_timeout(21, 7)` in shim.c), but throughput drops to ~64 MB/s.
+
+3. **ODP + CPU pre-fault per client slab**: `mmap(MAP_NORESERVE)` + `ibv_reg_mr(ON_DEMAND)`, then `MADV_POPULATE_WRITE` on the client's slab at connect time. Works — RSS grows from 4MB to slab size on connect, drops on disconnect via `MADV_DONTNEED`. But it pre-faults the entire client slab at once (e.g., 20GB), which is back to the pre-allocation problem.
+
+### The Correct Design (not yet implemented)
+
+**Slab-based dynamic grow/shrink with CPU pre-faulting:**
+
+1. `mmap(MAP_NORESERVE)` for max capacity — virtual only, 0 physical pages
+2. `ibv_reg_mr(ON_DEMAND)` — one rkey for the whole range
+3. Start with one small slab (e.g., 256MB) pre-faulted via `MADV_POPULATE_WRITE`
+4. **Background monitor thread**: when current slabs are 75% full, pre-fault the next 256MB slab
+5. NIC always writes to pre-faulted pages — 15μs/page, no ODP penalty
+6. When a client disconnects, `MADV_DONTNEED` on all its slabs — physical pages released
+7. No protocol changes — same single rkey + contiguous address space
+
+This gives: **dynamic memory (grows 256MB at a time) + fast I/O (15μs/page) + observable RSS.**
+
+### Also needed for full bandwidth
+
+Per the [NVIDIA DGX Spark performance guide](https://github.com/NVIDIA/dgx-spark-playbooks/blob/main/nvidia/connect-two-sparks/assets/performance_benchmarking_guide.md#dual-spark-1):
+
+- **Use BOTH QSFP links** (192.168.200.x and 192.168.201.x) — currently only using one
+- **RDMA buffer pool** — replace single-page Mutex with N concurrent transfers
+- **TX depth 128** — pipeline many RDMA WRITEs instead of one-at-a-time
+- Target: **10+ GB/s** (from current 274 MB/s)
+
+### Files to Change
+
+| File | What |
+|---|---|
+| `crates/duvm-backend-rdma/src/server.rs` | Slab-based dynamic allocation + background monitor |
+| `crates/duvm-backend-rdma/src/lib.rs` | Buffer pool (N concurrent transfers), use both links |
+| `crates/duvm-backend-rdma/src/shim.c` | `duvm_set_qp_timeout` already added |
+| `crates/duvm-backend-rdma/src/ffi.rs` | `IBV_ACCESS_ON_DEMAND`, `set_qp_timeout` already added |
 
 ## How to Run the Hardware Test
 
 ### On calc1 (memserver — no sudo needed):
 ```bash
 cd ~/projects/distributed-uvm
-./target/release/duvm-memserver --bind 192.168.200.10:9200 --rdma --rdma-port 9201 --max-pages 1000000
+./target/release/duvm-memserver --bind 192.168.200.10:9200 --rdma --rdma-port 9201 --max-pages 10000000 --rdma-pages-per-client 5000000
 ```
 
 ### On calc2 (compute node — needs sudo for kmod):
 ```bash
 cd ~/projects/distributed-uvm
+sudo bash scripts/setup-hardware-test.sh   # stops watchdog, loads kmod, mkswap, swapon
+sudo sysctl vm.swappiness=100              # needed to trigger swap
 
-# One-command setup (stops watchdog, loads kmod, mkswap, swapon, drops caches):
-sudo bash scripts/setup-hardware-test.sh
-
-# Start daemon (no sudo):
 cat > /tmp/duvm-hw.toml << 'EOF'
 [daemon]
 log_level = "info"
 socket_path = "/tmp/duvm.sock"
 
 [backends.memory]
-enabled = true
-max_pages = 262144
+enabled = false
 
 [backends.remote]
 enabled = true
 transport = "auto"
 peers = ["192.168.200.10:9201"]
-max_pages_per_peer = 262144
+max_pages_per_peer = 5000000
 EOF
 
 ./target/release/duvm-daemon --config /tmp/duvm-hw.toml --kmod-ctl /dev/duvm_ctl &
-
-# Wait for RDMA connection, then run swap test:
 sleep 5
-./scripts/swap_pressure_test 2048
+/tmp/force_swap   # or ./scripts/swap_pressure_test
 
-# Teardown:
 sudo bash scripts/setup-hardware-test.sh --teardown
 sudo systemctl start memory-watchdog earlyoom
+sudo sysctl vm.swappiness=10
 ```
 
-## Immediate Next Step
+### Monitoring on calc1:
+```bash
+watch -n 1 'echo "RSS: $(grep VmRSS /proc/$(pgrep duvm-memserver)/status | awk "{print \$2/1024\"MB\"}")" && rdma stat show link rocep1s0f0/1 | tr " " "\n" | grep -A1 rx_write'
+```
 
-**Run `scripts/swap_pressure_test` on calc2.** The test binary is ready. It allocates 256MB chunks, monitors MemFree (not MemAvailable — critical on UMA), stops at 4GB free, and verifies data integrity. Target: 2GB of swap through duvm_swap0.
+## Key Findings This Session
 
-The previous test proved 782MB swapped successfully. The system froze because the old test checked MemAvailable (18GB, misleading) instead of MemFree (665MB, dangerously low). The new test checks MemFree.
+### RDMA FFI constants were wrong
+- `IBV_SEND_SIGNALED` was `1<<2` (=4, actually `IBV_SEND_SOLICITED`), correct: `1<<1` (=2)
+- `IBV_WR_RDMA_READ` was 3, correct: 4
+- SoftiWARP was lenient, real ConnectX-7 is strict
 
-**Setup needed on calc2 before running:**
-1. `sudo bash scripts/setup-hardware-test.sh` (one command)
-2. Start memserver on calc1 (see above)
-3. Start daemon on calc2 with RDMA config (see above)
-4. `./scripts/swap_pressure_test 2048`
+### Async kmod queue_rq prevents DGX Spark freeze
+- Synchronous `submit_and_wait` in the kernel's memory reclaim path froze the system (3 power cycles)
+- Converted to async: `queue_rq` submits to ring, returns immediately, completion harvester thread calls `blk_mq_end_request`
+- Added 5s blk-mq timeout for orphaned requests (daemon killed by OOM)
+- Daemon sets `oom_score_adj=-999` to survive OOM killer
+
+### DGX Spark UMA is fragile
+- System freezes when `MemFree < ~1GB` — NVIDIA GPU driver enters D-state
+- `MemAvailable` is misleading on UMA — includes reclaimable cache that GPU can't wait for
+- Must check `MemFree` for safety thresholds
+- `memory-watchdog` and `earlyoom` must be stopped during swap testing (they kill the daemon)
+- `vm.swappiness=100` alone doesn't trigger swap — need `MADV_PAGEOUT` for recently-touched pages
+
+### ODP page faults are slow on ConnectX-7
+- Pure ODP: NIC faults pages on DMA write, ~100μs per page (vs 15μs pre-faulted)
+- Under rapid sequential writes: `IBV_WC_TRANSPORT_RETRY_COUNTER_EXCEEDED` (vendor_err=135)
+- Fixed by `set_qp_timeout(21, 7)` — 8.6s per retry instead of 67ms
+- ODP pages don't appear in VmRSS or MemFree — managed by RDMA subsystem
+- CPU pre-fault via `MADV_POPULATE_WRITE` makes pages visible in RSS and fast for NIC
+
+### Two QSFP links available
+- `rocep1s0f0` (192.168.200.x) + `roceP2p1s0f0` (192.168.201.x) = ~190 Gbps
+- Currently only using the first link
+- NVIDIA benchmark shows 92 + 97 Gbps with `ib_write_bw`
 
 ## Known Gaps
 
-### Remaining gaps
+### Performance (most impactful)
 
-#### Security (Critical for production)
-
-| Gap | Severity | Detail |
+| Gap | Impact | Detail |
 |---|---|---|
-| No authentication | Critical | TCP/RDMA connections have no auth. |
-| No encryption | Critical | Pages transmitted in plaintext over TCP. |
+| **Single-page RDMA Mutex** | Using 1.2% of bandwidth | One transfer at a time. Need buffer pool with N pre-registered buffers for concurrent RDMA ops. |
+| **Only using one QSFP link** | Using 50% of links | Second link (192.168.201.x) not configured. Need multi-path or bonding. |
+| **No discard/invalidation** | Memory leak on memserver | Kernel sends `REQ_OP_DISCARD` but kmod ignores it. Pages accumulate forever. |
 
-#### Cluster management (Critical for multi-node)
+### Operational
 
-| Gap | Severity | Detail |
+| Gap | Impact | Detail |
 |---|---|---|
-| Static peer config only | High | Adding a node requires editing config + restarting daemon on every node. |
-| No peer discovery | High | No etcd/consul/DNS-SD. |
-| No config reload | Medium | SIGHUP not handled. |
+| No authentication / TLS | Security | Anyone on the network can read/write pages. |
+| Static peer config | Operational | Adding a node requires config edit + restart. |
+| RDMA backend has no reconnection | Resilience | TCP has auto-reconnect + circuit breaker; RDMA doesn't. |
 
-#### Resilience
+## Test Summary
 
-| Gap | Severity | Detail |
+| Test | Checks | Status |
 |---|---|---|
-| RDMA backend has no reconnection | High | Unlike TCP (auto-reconnect + circuit breaker), RDMA drop is permanent. |
-| No discard/invalidation path | High | Kernel sends REQ_OP_DISCARD on swap slot free, but kmod ignores it. Pages accumulate on memserver forever (memory leak). Protocol plumbing exists (DUVM_OP_INVALIDATE, engine.invalidate_page()) but not wired up. |
-
-#### Performance
-
-| Gap | Severity | Detail |
-|---|---|---|
-| Single-page RDMA buffer | High | Mutex serializes all RDMA transfers. 15μs/page vs <1μs raw. Buffer pool needed. |
-| DGX Spark UMA freeze | Platform | System freezes when MemFree < ~1GB regardless of swap device. Known NVIDIA issue (#362769, #353752). Not fixable in our code — test must stay above 4GB MemFree. |
-
-#### Observability
-
-| Gap | Severity | Detail |
-|---|---|---|
-| Prometheus metrics not implemented | Medium | `metrics_port: 9100` in config but nothing listens. |
-
-## Key Architecture Changes This Session
-
-1. **Async queue_rq** (commit `5e01174`): Converted kmod from synchronous (submit + wait 500ms) to fully async. `queue_rq` submits to ring and returns immediately. Completion harvester kthread polls the completion ring and calls `blk_mq_end_request`. Modeled after nbd driver.
-
-2. **blk-mq timeout** (commit `580f7c1`): 5-second timeout per request. If daemon dies (OOM kill, crash), orphaned requests are failed with `BLK_EH_DONE` and the kernel falls back to the next swap device.
-
-3. **Staging slot bitmap** (commit `5e01174`): Replaced broken `idx % staging_pages` hash with proper bitmap allocator. Prevents two concurrent requests from using the same staging page.
-
-4. **Daemon OOM protection** (commit `580f7c1`): Daemon sets `oom_score_adj=-999` on startup.
-
-5. **FFI constant fixes** (commit `08e2a19`): `IBV_SEND_SIGNALED` was 4 (should be 2), `IBV_WR_RDMA_READ` was 3 (should be 4). SoftiWARP was lenient, real ConnectX-7 is strict.
-
-## Key Technical Decisions
-
-| Decision | Choice | Why |
-|---|---|---|
-| Swap interception | Virtual block device (blk-mq) | frontswap removed in Linux 6.17; block device uses stable API |
-| Kmod I/O model | **Async queue_rq + completion thread** | Synchronous blocked kernel reclaim on UMA, froze system |
-| Kmod↔daemon | Ring buffer via mmap of /dev/duvm_ctl | Low latency, zero-copy staging |
-| Completion signal | Daemon write() to /dev/duvm_ctl | Wakes kernel harvester thread immediately |
-| Transport | TCP default, RDMA optional (auto-detect) | TCP everywhere; RDMA for production (6.8x latency improvement) |
-| DGX Spark safety | Check MemFree not MemAvailable | MemAvailable includes reclaimable cache that GPU driver can't wait for |
+| `cargo test` | 196 pass | ✅ All green |
+| QEMU E2E (8 scripts) | 82 checks | ✅ All green in CI |
+| RDMA hardware (demo_rdma.rs) | 10K pages | ✅ 15μs/page, 0 errors |
+| Full-stack swap (force_swap) | 4GB / 14.6M pages | ✅ 0 errors, system stable |
 
 ## Files Changed This Session
 
 | File | Change |
 |---|---|
-| `duvm-kmod/src/main.c` | Async queue_rq, completion thread, staging bitmap, timeout handler, OOM protection |
-| `duvm-kmod/src/ring.c` | `duvm_ring_submit()`, `duvm_ring_poll_completion()`, staging bitmap alloc |
-| `duvm-kmod/include/duvm_kmod.h` | `duvm_cmd` PDU struct, `comp_thread`, bitmap fields, new ring APIs |
-| `crates/duvm-daemon/src/kmod_ring.rs` | write() to ctl fd after completion (wake kernel thread) |
-| `crates/duvm-daemon/src/main.rs` | oom_score_adj=-999 on startup |
-| `crates/duvm-daemon/examples/demo_rdma.rs` | New: RDMA hardware test binary |
-| `crates/duvm-backend-rdma/src/ffi.rs` | Fix IBV_SEND_SIGNALED (4→2), IBV_WR_RDMA_READ (3→4) |
-| `scripts/setup-hardware-test.sh` | New: one-command hardware test setup |
-| `scripts/swap_pressure_test.c` | New: safe swap pressure test (MemFree-based threshold) |
+| `duvm-kmod/src/main.c` | Async queue_rq, completion thread, staging bitmap, timeout handler |
+| `duvm-kmod/src/ring.c` | `duvm_ring_submit()`, `duvm_ring_poll_completion()`, staging bitmap |
+| `duvm-kmod/include/duvm_kmod.h` | `duvm_cmd` PDU, `comp_thread`, bitmap, new ring APIs |
+| `crates/duvm-daemon/src/kmod_ring.rs` | write() to ctl fd after completion (wake kernel) |
+| `crates/duvm-daemon/src/main.rs` | oom_score_adj=-999 |
+| `crates/duvm-daemon/examples/demo_rdma.rs` | RDMA hardware test binary |
+| `crates/duvm-backend-rdma/src/ffi.rs` | Fix FFI constants, add ON_DEMAND + set_qp_timeout |
+| `crates/duvm-backend-rdma/src/lib.rs` | rnr_retry_count, QP timeout for ODP |
+| `crates/duvm-backend-rdma/src/server.rs` | ODP + slab pre-fault + DONTNEED on disconnect |
+| `crates/duvm-backend-rdma/src/shim.c` | `duvm_set_qp_timeout()` wrapper |
+| `crates/duvm-backend-rdma/build.rs` | rerun-if-changed for shim.c |
+| `scripts/setup-hardware-test.sh` | One-command hardware test setup |
+| `scripts/swap_pressure_test.c` | Safe MemFree-based swap test |
