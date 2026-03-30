@@ -20,3 +20,4 @@ duvm-kmod/.tmp_versions/
 .DS_Store
 Thumbs.db
 linux-image-*.deb
+scripts/swap_pressure_test

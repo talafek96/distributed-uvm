@@ -62,10 +62,27 @@ echo "[3/4] Setting permissions..."
 chmod 666 /dev/duvm_ctl
 echo "  /dev/duvm_ctl is world-accessible"
 
-echo "[4/4] Ready."
+# Drop caches to maximize MemFree (critical on UMA — MemAvailable is misleading)
+echo "[4/4] Dropping page cache and building test..."
+sync; echo 3 > /proc/sys/vm/drop_caches
+echo "  MemFree: $(awk '/MemFree/ {printf "%d MB", $2/1024}' /proc/meminfo)"
+
+# Build swap pressure test if source exists
+if [[ -f "$PROJECT_ROOT/scripts/swap_pressure_test.c" ]]; then
+    gcc -O2 -o "$PROJECT_ROOT/scripts/swap_pressure_test" \
+        "$PROJECT_ROOT/scripts/swap_pressure_test.c" 2>/dev/null \
+        && echo "  swap_pressure_test built" \
+        || echo "  swap_pressure_test build failed (gcc missing?)"
+fi
+
+echo ""
+echo "=== Ready ==="
 echo ""
 echo "  Next: start the daemon (no sudo needed):"
 echo "    ./target/release/duvm-daemon --config /path/to/config.toml --kmod-ctl /dev/duvm_ctl"
+echo ""
+echo "  Run swap test (after daemon is connected):"
+echo "    ./scripts/swap_pressure_test 2048"
 echo ""
 echo "  Teardown when done:"
 echo "    sudo bash scripts/setup-hardware-test.sh --teardown"
