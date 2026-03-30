@@ -209,7 +209,7 @@ impl RdmaMemServer {
                 std::ptr::null_mut(),
                 buf_size,
                 libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_POPULATE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
                 -1,
                 0,
             )
@@ -226,7 +226,8 @@ impl RdmaMemServer {
                 buf_size,
                 ffi::IBV_ACCESS_LOCAL_WRITE
                     | ffi::IBV_ACCESS_REMOTE_WRITE
-                    | ffi::IBV_ACCESS_REMOTE_READ,
+                    | ffi::IBV_ACCESS_REMOTE_READ
+                    | ffi::IBV_ACCESS_ON_DEMAND,
             )
         };
         if mr.is_null() {
@@ -239,7 +240,7 @@ impl RdmaMemServer {
 
         let rkey = unsafe { (*mr).rkey };
         eprintln!(
-            "  RDMA server: buffer={} pages ({:.1} MB), rkey=0x{:08x}, addr=0x{:x}",
+            "  RDMA server: capacity={} pages ({:.1} MB), rkey=0x{:08x}, addr=0x{:x} [ODP — memory allocated on demand]",
             self.max_pages,
             buf_size as f64 / 1e6,
             rkey,

@@ -11,6 +11,7 @@ use libc::{c_char, c_int, c_void, size_t};
 pub const IBV_ACCESS_LOCAL_WRITE: c_int = 1;
 pub const IBV_ACCESS_REMOTE_WRITE: c_int = 2;
 pub const IBV_ACCESS_REMOTE_READ: c_int = 4;
+pub const IBV_ACCESS_ON_DEMAND: c_int = 1 << 6;
 
 pub const IBV_QPT_RC: c_int = 2; // Reliable Connection
 
