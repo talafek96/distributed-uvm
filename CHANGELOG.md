@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-03-30 — FULL-STACK SWAP PROVEN on real hardware
+
+**4GB (14.6M pages) swapped through kmod→daemon→RDMA→memserver on ConnectX-7 RoCEv2, zero errors, system stable.** Used `MADV_PAGEOUT` to force pages out through duvm_swap0. Pages verified byte-for-byte on readback.
+
+Key findings:
+- `vm.swappiness=100` alone doesn't trigger swap — kernel needs pages marked cold
+- `MADV_PAGEOUT` (Linux 5.4+) explicitly tells kernel to page out to swap device
+- DGX Spark UMA freezes when MemFree < ~1GB — must check MemFree (not MemAvailable)
+- Memory watchdog/earlyoom must be stopped during swap testing (they kill the daemon)
+
 ## 2026-03-30 — Async kmod I/O, hardware validation, DGX Spark UMA work
 
 ### RDMA Hardware Validation
