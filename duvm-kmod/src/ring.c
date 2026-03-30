@@ -86,6 +86,15 @@ int duvm_ring_init(struct duvm_ring *ring, unsigned int capacity,
     init_waitqueue_head(&ring->req_wait);
     ring->daemon_connected = false;
 
+    /* Staging slot bitmap allocator */
+    ring->staging_bitmap = bitmap_zalloc(staging_pg, GFP_KERNEL);
+    if (!ring->staging_bitmap) {
+        pr_err("duvm: failed to allocate staging bitmap\n");
+        vunmap(vaddr);
+        goto err_free_pages;
+    }
+    spin_lock_init(&ring->staging_lock);
+
     pr_info("duvm: ring buffer initialized (%u pages, %zu bytes)\n",
             total_pages, total_sz);
     return 0;
@@ -104,6 +113,9 @@ void duvm_ring_destroy(struct duvm_ring *ring)
     if (!ring->ring_pages)
         return;
 
+    bitmap_free(ring->staging_bitmap);
+    ring->staging_bitmap = NULL;
+
     /* Unmap virtual address */
     if (ring->header)
         vunmap(ring->header);
@@ -117,6 +129,57 @@ void duvm_ring_destroy(struct duvm_ring *ring)
     kvfree(ring->ring_pages);
     ring->ring_pages = NULL;
     ring->header = NULL;
+}
+
+/*
+ * Submit a request to the ring without waiting for completion.
+ * Returns 0 on success, -EAGAIN if ring full, -ENODEV if daemon disconnected.
+ * The caller must set req->seq before calling (use atomic_inc_return on seq_counter).
+ */
+int duvm_ring_submit(struct duvm_ring *ring, struct duvm_request *req)
+{
+    __u32 capacity, mask, write_idx, next_write;
+
+    if (!ring->daemon_connected)
+        return -ENODEV;
+
+    capacity  = ring->header->capacity;
+    mask      = capacity - 1;
+    write_idx = ring->header->req_write_idx;
+    next_write = (write_idx + 1) & mask;
+
+    if (next_write == READ_ONCE(ring->header->req_read_idx))
+        return -EAGAIN;
+
+    memcpy(&ring->requests[write_idx], req, sizeof(*req));
+
+    smp_wmb();
+    WRITE_ONCE(ring->header->req_write_idx, next_write);
+
+    wake_up(&ring->req_wait);
+    return 0;
+}
+
+/*
+ * Poll the completion ring for one completed request.
+ * Returns 0 and fills comp if a completion was found, -EAGAIN if empty.
+ */
+int duvm_ring_poll_completion(struct duvm_ring *ring,
+                              struct duvm_completion *comp)
+{
+    __u32 cidx, cwrite, mask;
+
+    mask   = ring->header->capacity - 1;
+    cidx   = ring->header->comp_read_idx;
+    cwrite = READ_ONCE(ring->header->comp_write_idx);
+
+    if (cidx == cwrite)
+        return -EAGAIN;
+
+    smp_rmb();
+    memcpy(comp, &ring->completions[cidx], sizeof(*comp));
+    WRITE_ONCE(ring->header->comp_read_idx, (cidx + 1) & mask);
+    return 0;
 }
 
 /*

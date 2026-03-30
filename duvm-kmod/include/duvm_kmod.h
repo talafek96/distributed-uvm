@@ -9,6 +9,8 @@
 #include <linux/miscdevice.h>
 #include <linux/wait.h>
 #include <linux/mm.h>
+#include <linux/kthread.h>
+#include <linux/bitmap.h>
 
 /* Constants */
 #define DUVM_DEVICE_NAME    "duvm_swap"
@@ -23,6 +25,16 @@
 #define DUVM_OP_STORE      1
 #define DUVM_OP_LOAD       2
 #define DUVM_OP_INVALIDATE 3
+
+/*
+ * Per-request command data — stored in blk-mq PDU (private data unit).
+ * Allocated by blk-mq via tag_set.cmd_size.
+ */
+struct duvm_cmd {
+    __u32 seq;              /* sequence number (matches completion) */
+    __u32 staging_slot;     /* which staging page this request uses */
+    bool  is_read;          /* true = LOAD (need to copy staging→bio on completion) */
+};
 
 /*
  * Ring buffer request: kernel -> daemon.
@@ -84,6 +96,10 @@ struct duvm_ring {
     wait_queue_head_t        comp_wait;     /* kernel waits here for completions */
     wait_queue_head_t        req_wait;      /* daemon waits here for new requests (poll) */
     bool                     daemon_connected;
+
+    /* Staging slot allocator (bitmap: 1=in-use, 0=free) */
+    unsigned long           *staging_bitmap;
+    spinlock_t               staging_lock;
 };
 
 /* Per-device state */
@@ -94,12 +110,18 @@ struct duvm_device {
     struct miscdevice        ctl_misc;   /* /dev/duvm_ctl for daemon mmap */
     unsigned long            size_pages; /* device size in pages */
     bool                     initialized;
+    struct task_struct      *comp_thread; /* completion harvester thread */
 };
 
 /* ring.c */
 int  duvm_ring_init(struct duvm_ring *ring, unsigned int capacity,
                     unsigned long staging_pages);
 void duvm_ring_destroy(struct duvm_ring *ring);
+int  duvm_ring_submit(struct duvm_ring *ring, struct duvm_request *req);
+int  duvm_ring_poll_completion(struct duvm_ring *ring,
+                               struct duvm_completion *comp);
+
+/* Kept for xarray fallback path (synchronous) */
 int  duvm_ring_submit_and_wait(struct duvm_ring *ring,
                                struct duvm_request *req,
                                struct duvm_completion *comp,

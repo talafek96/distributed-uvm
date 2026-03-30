@@ -265,6 +265,11 @@ impl KmodRingConsumer {
         let next_comp_write = (comp_write + 1) & self.mask;
         unsafe { write_u32(self.header, HDR_COMP_WRITE_IDX, next_comp_write) };
 
+        // Signal the kernel's completion harvester thread via write() on ctl fd.
+        // This wakes the thread immediately instead of waiting for its poll timeout.
+        use std::io::Write;
+        let _ = (&self._file).write(&[0u8]);
+
         true
     }
 
