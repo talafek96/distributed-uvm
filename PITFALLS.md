@@ -157,3 +157,10 @@
 **Fix:** Corrected both constants. Verified with a C test program that printed the actual enum values.
 **Lesson:** Never hand-write FFI enum values. Always verify against `sizeof`/`offsetof`/enum value C test programs. Add a compile-time assertion or build.rs check.
 **Commit:** 08e2a19
+
+## Secure Boot rejects unsigned kernel modules (insmod: Key was rejected by service)
+
+**Symptom:** `insmod duvm-kmod.ko` fails with "Key was rejected by service" on DGX Spark.
+**Cause:** Secure Boot is enabled. Unsigned kernel modules are rejected.
+**Fix:** Disabled Secure Boot on calc2 via `mokutil --disable-validation` + reboot + UEFI enrollment. Alternative: sign the module with a MOK key (one-time reboot to enroll, then sign modules without rebooting).
+**Lesson:** Check `mokutil --sb-state` before attempting insmod on new machines.
