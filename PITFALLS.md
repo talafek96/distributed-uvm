@@ -172,3 +172,11 @@
 **Fix:** NOT YET FIXED. Requires: (1) larger ring buffer (256 → 4096+), (2) RDMA buffer pool for concurrent transfers, (3) possibly `BLK_STS_AGAIN` when ring is full instead of blocking. The direct RDMA test (`demo_rdma.rs`) works because it doesn't go through the kmod/ring — it calls the backend directly.
 **Lesson:** Do NOT run memory pressure tests against the full kmod stack until the ring/buffer pool performance work is done. The direct backend test (`demo_rdma.rs`, `demo_distributed.rs`) is sufficient for validating RDMA correctness. SSH escape sequence `~.` force-disconnects a stuck SSH session.
 **Workaround for stuck SSH:** Type `Enter` then `~.` to force-disconnect from a frozen remote host.
+
+## BLK_STS_RESOURCE alone doesn't prevent freeze under swap pressure
+
+**Symptom:** Even with BLK_STS_RESOURCE on ring full and ring_entries=4096, allocating 45GB on a 48GB-available machine still freezes calc2. Third hard power cycle.
+**Cause:** The ring full path was only part of the problem. The real issue: `submit_and_wait()` blocks in kernel context for up to 500ms per request waiting for daemon completion. When kernel reclaim submits many pages, each blocks a kernel thread. The daemon processes them serially (15μs each through RDMA Mutex), but hundreds of kernel threads are parked in `wait_event_timeout`. This exhausts kernel resources and stalls the memory subsystem.
+**Root cause:** `queue_rq` is synchronous — it calls `submit_and_wait` which sleeps until the daemon responds. The swap I/O path must be async: submit to ring, return `BLK_STS_OK` immediately, complete the bio later via `blk_mq_end_request` in a completion callback.
+**Fix:** NOT YET IMPLEMENTED. Requires converting `queue_rq` to async: submit request to ring without waiting, return BLK_STS_OK, add a completion harvester thread (or use blk-mq's async completion) that polls the completion ring and calls `blk_mq_end_request` for each completed I/O.
+**Lesson:** Never block in `queue_rq` for a slow device. Use async I/O completion. The blk-mq framework supports this via `blk_mq_start_request` + deferred `blk_mq_end_request`.
