@@ -6,105 +6,109 @@
 
 ## Current State
 
-**Phase: Service management implemented. Enable/disable/drain via duvm-ctl. All bugs from Phase 1 fixed.**
+**RDMA hardware validated on ConnectX-7 RoCEv2. Async kmod I/O path implemented. Full-stack swap test in progress — 782MB successfully swapped to remote machine before DGX Spark UMA platform freeze. Safer test program written but not yet run.**
 
 ### What Works (Proven)
 
 | What | Evidence | Command |
 |---|---|---|
-| **Enable/disable service** | `duvm-ctl enable/disable/drain` manage full lifecycle | `sudo duvm-ctl enable` / `sudo duvm-ctl disable` |
 | **RDMA on real hardware** | 10,000 pages via ConnectX-7 RoCEv2, 15μs/page, 0 errors | `cargo run --release --example demo_rdma -p duvm-daemon` |
+| **Full-stack swap (partial)** | 782MB swapped through kmod→daemon→RDMA→memserver on real hardware | `scripts/swap_pressure_test` (froze before completion due to UMA) |
+| **Async kmod I/O** | queue_rq never blocks; completion harvester thread + 5s blk-mq timeout | All QEMU tests pass in CI |
+| TCP on real hardware | 10,000 pages calc1↔calc2 over ConnectX-7, 102μs/page, byte-perfect | `cargo run --example demo_distributed --release -p duvm-daemon` |
+| Enable/disable service | `duvm-ctl enable/disable/drain` manage full lifecycle | `sudo duvm-ctl enable` / `sudo duvm-ctl disable` |
 | RDMA end-to-end (SoftiWARP) | Two VMs: daemon → RDMA WRITE → memserver MR, 18/18 | `bash scripts/test-rdma-qemu.sh` |
-| Kernel module ↔ daemon ring buffer | Pages flow kmod → ring → daemon → backend, 10/10 QEMU | `bash scripts/test-kmod-daemon-qemu.sh` |
-| Two-VM distributed test | VM-A (kmod+daemon) talks to VM-B (memserver), 12/12 | `bash scripts/test-distributed-qemu.sh` |
-| Kernel module standalone | insmod, mkswap, swapon, block I/O, rmmod — 16/16 QEMU | `bash scripts/test-kmod-qemu.sh` |
-| Cross-machine TCP (real hardware) | 10,000 pages calc1↔calc2 over ConnectX-7, byte-perfect | `cargo run --example demo_distributed --release -p duvm-daemon` |
-| Engine + policy + eviction + transport | LRU, tier cascading, transport modes, 196 Rust tests | `cargo test` |
+| Full distributed TCP path | kmod→daemon→TCP→memserver on B, data integrity verified, 13/13 | `bash scripts/test-distributed-qemu.sh` |
+| Engine + policy + eviction | LRU, tier cascading, backend retry/fallback, 196 Rust tests | `cargo test` |
+
+### Performance (measured on ConnectX-7 RoCEv2)
+
+| Metric | TCP | RDMA | Improvement |
+|---|---|---|---|
+| Store latency | 102 μs/page | 15 μs/page | 6.8x |
+| Load latency | 98 μs/page | 15 μs/page | 6.4x |
+| Store throughput | 24 MB/s | 274 MB/s | 11.2x |
+| Load throughput | 42 MB/s | 267 MB/s | 6.4x |
 
 ### Test Summary
 
 | Test | Checks | What it proves |
 |---|---|---|
-| `cargo test` | 196 pass | User-space engine, policy, backends, config, transport modes, TCP capacity, reconnection |
+| `cargo test` | 196 pass | User-space engine, policy, backends, config, transport, reconnection |
 | `test-kmod-qemu.sh` | 16/16 | Kernel module: load, block I/O, swap, unload |
 | `test-kmod-daemon-qemu.sh` | 10/10 | Ring buffer: kmod → daemon → engine → backend |
-| `test-distributed-qemu.sh` | 13/13 | Two VMs: kmod+daemon on A, **TCP backend → memserver on B**, network I/O + data integrity |
-| `test-mutual-oom-qemu.sh` | 9/9 | Two VMs: mutual OOM degradation, graceful fallback |
-| `test-3machine-qemu.sh` | 10/10 | Three VMs: fair distribution across peers, exhaustion handling |
-| `test-rdma-qemu.sh` | 18/18 | **Full RDMA: SoftiWARP, CM handshake, one-sided WRITE/READ, data integrity** |
-| `test-memserver-concurrent-qemu.sh` | 6/6 | **Concurrent TCP clients: parallel alloc, capacity enforcement under load** |
+| `test-distributed-qemu.sh` | 13/13 | Two VMs: kmod+daemon→TCP→memserver, data integrity |
+| `test-mutual-oom-qemu.sh` | 9/9 | Mutual OOM degradation, graceful fallback |
+| `test-3machine-qemu.sh` | 10/10 | Three VMs: fair distribution, exhaustion handling |
+| `test-rdma-qemu.sh` | 18/18 | Full RDMA: SoftiWARP, CM handshake, WRITE/READ |
+| `test-memserver-concurrent-qemu.sh` | 6/6 | Concurrent TCP clients, capacity enforcement |
 
-All QEMU tests run in CI (`e2e-kmod` job on `ubuntu-24.04-arm`).
-
-### Components
-
-| Component | Status | Location |
-|---|---|---|
-| **duvm-kmod** | Complete + tested | `duvm-kmod/` — Virtual block device, ring buffer, xarray fallback |
-| **duvm-daemon** | Complete + tested | `crates/duvm-daemon/` — Engine, policy, ring consumer, control socket |
-| **duvm-memserver** | Complete + tested | `crates/duvm-memserver/` — Remote memory server |
-| **duvm-common** | Complete | `crates/duvm-common/` — PageHandle, ring buffer, protocol, stats |
-| **duvm-backend-trait** | Complete | `crates/duvm-backend-trait/` — Backend plugin interface |
-| **duvm-backend-memory** | Complete | `crates/duvm-backend-memory/` — In-memory backend |
-| **duvm-backend-compress** | Complete | `crates/duvm-backend-compress/` — LZ4 compression backend |
-| **duvm-backend-tcp** | Complete — reconnection | `crates/duvm-backend-tcp/` — TCP remote memory backend with auto-reconnect + circuit breaker |
-| **duvm-backend-rdma** | Complete — end-to-end verified | `crates/duvm-backend-rdma/` — RDMA (libibverbs + librdmacm) backend + server |
-| **duvm-ctl** | Complete — enable/disable/drain | `crates/duvm-ctl/` — CLI: status, stats, backends, ping, enable, disable, drain |
-| **libduvm** | Complete | `crates/libduvm/` — Rust + C FFI library |
+All QEMU tests run in CI (`e2e-kmod` job on `ubuntu-24.04-arm`). All green.
 
 ### Hardware
 
-- 2x NVIDIA DGX Spark (GB10 Blackwell, 128GB unified LPDDR5X each)
-- 4x ConnectX-7 200Gbps RoCE (calc1: 192.168.200.10, calc2: 192.168.200.11)
+- **calc1** (192.168.200.10): DGX Spark, 128GB, Secure Boot ON — used as memserver
+- **calc2** (192.168.200.11): DGX Spark, 128GB, Secure Boot OFF — used as compute node (kmod + daemon)
+- 4x ConnectX-7 200Gbps RoCE (device names: `rocep1s0f0` etc, not `mlx5_*`)
 - aarch64, Linux 6.17.0-1008-nvidia, CUDA 13.0
-- GPU UVM via ATS (hardware — no special code needed)
+- Memory guard: `memory-watchdog` + `earlyoom` installed (must be stopped for swap testing)
 
-## How to Build and Test
+## How to Run the Hardware Test
 
+### On calc1 (memserver — no sudo needed):
 ```bash
-# Build everything
-cargo build --release
-make -C duvm-kmod
-
-# Run Rust tests (196 tests, no sudo needed)
-cargo test
-
-# QEMU tests (no sudo needed)
-bash scripts/test-kmod-qemu.sh            # Kernel module standalone
-bash scripts/test-kmod-daemon-qemu.sh      # Kmod + daemon ring buffer
-bash scripts/test-distributed-qemu.sh      # Two VMs: distributed memory
-bash scripts/test-rdma-qemu.sh             # SoftRoCE + auto-fallback
-
-# Enable/disable distributed memory (requires sudo):
-sudo duvm-ctl enable                       # Load kmod, start services, activate swap
-sudo duvm-ctl disable                      # Drain pages, stop services, unload kmod
-sudo duvm-ctl drain                        # Migrate pages back, keep services running
-duvm-ctl status                            # Check daemon status (no sudo)
-
-# Manual setup (alternative to duvm-ctl enable):
-sudo bash scripts/setup-kmod-for-testing.sh        # Load kmod, set permissions
-cargo run --release -p duvm-daemon -- --kmod-ctl /dev/duvm_ctl  # Start daemon
-sudo swapon -p 100 /dev/duvm_swap0                 # Activate swap
-sudo bash scripts/setup-kmod-for-testing.sh --teardown  # Cleanup
+cd ~/projects/distributed-uvm
+./target/release/duvm-memserver --bind 192.168.200.10:9200 --rdma --rdma-port 9201 --max-pages 1000000
 ```
 
+### On calc2 (compute node — needs sudo for kmod):
+```bash
+cd ~/projects/distributed-uvm
+
+# One-command setup (stops watchdog, loads kmod, mkswap, swapon, drops caches):
+sudo bash scripts/setup-hardware-test.sh
+
+# Start daemon (no sudo):
+cat > /tmp/duvm-hw.toml << 'EOF'
+[daemon]
+log_level = "info"
+socket_path = "/tmp/duvm.sock"
+
+[backends.memory]
+enabled = true
+max_pages = 262144
+
+[backends.remote]
+enabled = true
+transport = "auto"
+peers = ["192.168.200.10:9201"]
+max_pages_per_peer = 262144
+EOF
+
+./target/release/duvm-daemon --config /tmp/duvm-hw.toml --kmod-ctl /dev/duvm_ctl &
+
+# Wait for RDMA connection, then run swap test:
+sleep 5
+./scripts/swap_pressure_test 2048
+
+# Teardown:
+sudo bash scripts/setup-hardware-test.sh --teardown
+sudo systemctl start memory-watchdog earlyoom
+```
+
+## Immediate Next Step
+
+**Run `scripts/swap_pressure_test` on calc2.** The test binary is ready. It allocates 256MB chunks, monitors MemFree (not MemAvailable — critical on UMA), stops at 4GB free, and verifies data integrity. Target: 2GB of swap through duvm_swap0.
+
+The previous test proved 782MB swapped successfully. The system froze because the old test checked MemAvailable (18GB, misleading) instead of MemFree (665MB, dangerously low). The new test checks MemFree.
+
+**Setup needed on calc2 before running:**
+1. `sudo bash scripts/setup-hardware-test.sh` (one command)
+2. Start memserver on calc1 (see above)
+3. Start daemon on calc2 with RDMA config (see above)
+4. `./scripts/swap_pressure_test 2048`
+
 ## Known Gaps
-
-### Bugs — all Phase 1 bugs fixed
-
-| Gap | Status | Detail |
-|---|---|---|
-| ~~RDMA server CQ leak~~ | **Fixed** | Per-connection CQs tracked in HashMap, destroyed on disconnect and shutdown. |
-| ~~`alloc_page()` TOCTOU race~~ | **Fixed** | Replaced load-then-fetch_add with `compare_exchange` loop in RDMA backend, TCP backend, and memserver. |
-| ~~`rdma_cm_event` struct padding~~ | **Fixed** | `_pad: [u8; 36]` now matches real `sizeof(rdma_cm_event) = 80`. |
-
-### Operational — Phase 2 complete
-
-| Gap | Status | Detail |
-|---|---|---|
-| ~~No enable/disable service~~ | **Fixed** | `duvm-ctl enable/disable/drain` + systemd units for daemon, memserver, kmod. Uses absolute paths for security. |
-| ~~No graceful drain~~ | **Fixed** | `duvm-ctl drain` runs swapoff, migrating remote pages back to local RAM. |
-| ~~Memserver single-threaded~~ | **Fixed** | `thread::spawn` per TCP client. Multiple clients served concurrently. |
 
 ### Remaining gaps
 
@@ -112,86 +116,70 @@ sudo bash scripts/setup-kmod-for-testing.sh --teardown  # Cleanup
 
 | Gap | Severity | Detail |
 |---|---|---|
-| No authentication | Critical | TCP/RDMA connections have no auth. Anyone who can reach port 9200 can read/write any page. DECISIONS.md says "trusted network" — insufficient for multi-tenant or cloud. |
-| No encryption | Critical | Pages transmitted in plaintext over TCP. Sensitive application data exposed on the wire. |
-| Memserver accepts any client | High | No ACL, no connection allow-list. No way to restrict which machines can store/load pages. |
+| No authentication | Critical | TCP/RDMA connections have no auth. |
+| No encryption | Critical | Pages transmitted in plaintext over TCP. |
 
 #### Cluster management (Critical for multi-node)
 
 | Gap | Severity | Detail |
 |---|---|---|
-| Static peer config only | High | Peers must be listed in `duvm.toml` before daemon starts. Adding a node requires editing config + restarting daemon on every existing node. |
-| No peer discovery | High | No integration with etcd/consul/DNS-SD. Each node must be manually configured to know about every other node. |
-| No config reload | Medium | `duvm-daemon.service` has `ExecReload=/bin/kill -HUP $MAINPID` but daemon doesn't handle SIGHUP. Config changes require full restart. |
-| No runtime peer add/remove | Medium | No `duvm-ctl add-peer` or `remove-peer` commands. Daemon socket only supports status/stats/backends/ping. |
-| No cluster health monitoring | Medium | No periodic health checks on remote peers. Backend health only checked at page allocation time. |
+| Static peer config only | High | Adding a node requires editing config + restarting daemon on every node. |
+| No peer discovery | High | No etcd/consul/DNS-SD. |
+| No config reload | Medium | SIGHUP not handled. |
 
 #### Resilience
 
 | Gap | Severity | Detail |
 |---|---|---|
-| RDMA backend has no reconnection | High | Unlike TCP (which now auto-reconnects), RDMA connection drop is permanent. `is_healthy()` only checks init state, doesn't detect broken connections. |
-| Daemon shutdown doesn't drain pages | Medium | `Ctrl+C` / SIGTERM calls `backend.shutdown()` but doesn't run `swapoff` first. Remote pages are abandoned. Operator must run `duvm-ctl drain` manually before stopping. |
+| RDMA backend has no reconnection | High | Unlike TCP (auto-reconnect + circuit breaker), RDMA drop is permanent. |
+| No discard/invalidation path | High | Kernel sends REQ_OP_DISCARD on swap slot free, but kmod ignores it. Pages accumulate on memserver forever (memory leak). Protocol plumbing exists (DUVM_OP_INVALIDATE, engine.invalidate_page()) but not wired up. |
 
 #### Performance
 
 | Gap | Severity | Detail |
 |---|---|---|
-| **Ring buffer too small for real swap pressure** | **Critical** | 256-entry ring + serialized RDMA Mutex = machine freeze under memory pressure. Kernel reclaim blocks in `submit_and_wait`. Requires: ring 4096+, RDMA buffer pool, possibly `BLK_STS_AGAIN` on ring full. |
-| Single-page RDMA buffer | High | RDMA backend holds Mutex for entire transfer. All RDMA ops serialized. Measured 15μs/page on ConnectX-7 vs <1μs raw. |
+| Single-page RDMA buffer | High | Mutex serializes all RDMA transfers. 15μs/page vs <1μs raw. Buffer pool needed. |
+| DGX Spark UMA freeze | Platform | System freezes when MemFree < ~1GB regardless of swap device. Known NVIDIA issue (#362769, #353752). Not fixable in our code — test must stay above 4GB MemFree. |
 
 #### Observability
 
 | Gap | Severity | Detail |
 |---|---|---|
-| Prometheus metrics not implemented | Medium | Config has `metrics_port: 9100` but nothing listens on it. Stats exist in `DaemonStats` but only accessible via Unix socket. |
+| Prometheus metrics not implemented | Medium | `metrics_port: 9100` in config but nothing listens. |
 
-#### Test coverage
+## Key Architecture Changes This Session
 
-| Gap | Severity | Detail |
-|---|---|---|
-| `test-3machine-qemu.sh` doesn't verify distribution | Medium | Writes pages and reads them back, but doesn't check that pages actually went to different peers (B and C). |
-| No `duvm-ctl enable/disable` integration test | Medium | These commands are untested end-to-end. |
-| No daemon crash recovery test | Medium | No test for: daemon dies mid-request → kmod doesn't hang → kernel falls back. |
-| No multi-peer failover test | Medium | No test for: peer A dies → new pages route to peer B → no hang. |
-| No RDMA negative tests | Medium | No tests for RDMA connection timeout, rejection, address resolution failure. |
+1. **Async queue_rq** (commit `5e01174`): Converted kmod from synchronous (submit + wait 500ms) to fully async. `queue_rq` submits to ring and returns immediately. Completion harvester kthread polls the completion ring and calls `blk_mq_end_request`. Modeled after nbd driver.
 
-## What's Next
+2. **blk-mq timeout** (commit `580f7c1`): 5-second timeout per request. If daemon dies (OOM kill, crash), orphaned requests are failed with `BLK_EH_DONE` and the kernel falls back to the next swap device.
 
-### Phase 3 — Production hardening (no hardware needed)
+3. **Staging slot bitmap** (commit `5e01174`): Replaced broken `idx % staging_pages` hash with proper bitmap allocator. Prevents two concurrent requests from using the same staging page.
 
-1. **Prometheus metrics** — HTTP listener on `metrics_port` exposing `DaemonStats` + backend health in Prometheus exposition format.
-2. **SIGHUP config reload** — daemon re-reads `duvm.toml` on SIGHUP, adds/removes backends for new/removed peers without full restart.
-3. **RDMA reconnection** — port the TCP auto-reconnect + circuit breaker pattern to RDMA backend.
+4. **Daemon OOM protection** (commit `580f7c1`): Daemon sets `oom_score_adj=-999` on startup.
 
-### Phase 4 — Production validation (needs hardware)
-
-1. **Real RDMA hardware test** — ConnectX-7 RoCEv2 on DGX Spark, measure latency vs TCP.
-2. **RDMA buffer pool** — replace single-page Mutex buffer with lock-free pool for concurrent ops.
-3. **Multi-peer failover QEMU test** — 3 VMs, kill one peer mid-operation, verify traffic reroutes.
-4. **Daemon crash recovery QEMU test** — kill daemon mid-request, verify kmod timeout + kernel fallback.
-
-### Phase 5 — Cluster management (design needed)
-
-1. **Peer discovery** — etcd/consul/DNS-SD integration or simple multicast.
-2. **Runtime peer add/remove** — `duvm-ctl add-peer` / `remove-peer` + daemon socket commands.
-3. **TLS + auth** — mutual TLS for TCP, token-based auth for RDMA private data.
-4. **Page migration on peer leave** — drain pages from departing node to remaining nodes.
+5. **FFI constant fixes** (commit `08e2a19`): `IBV_SEND_SIGNALED` was 4 (should be 2), `IBV_WR_RDMA_READ` was 3 (should be 4). SoftiWARP was lenient, real ConnectX-7 is strict.
 
 ## Key Technical Decisions
 
-See `DECISIONS.md` for full rationale. See `research/` for prior art surveys. See `docs/ARCHITECTURE.md` for full page lifecycle.
-
 | Decision | Choice | Why |
 |---|---|---|
-| Swap interception | Virtual block device (not frontswap) | frontswap removed in Linux 6.17; block device uses stable blk-mq API |
-| Kmod↔daemon | Shared ring buffer via mmap of /dev/duvm_ctl | Low latency, zero-copy staging area for page data |
-| Daemon wake-up | poll() on /dev/duvm_ctl (event-driven, ~1-5us) | No polling loop, instant response to kernel requests |
-| Architecture | Symmetric — every node is compute + memory | All nodes equal; no single point of failure |
-| Transport | TCP default, RDMA optional (auto-detect) | TCP works everywhere; RDMA for production performance |
-| Multi-peer | Round-robin across peers in same tier | Fair distribution; config: `peers = [...]` |
-| Policy | LRU with tier-aware cascading + eviction | Prefers lowest-latency tier; evicts cold pages when full |
-| Mutual OOM | Memserver refuses when full → I/O error → kernel tries next swap device | No deadlock, no recursion |
-| GPU UVM | Hardware ATS on DGX Spark; HMM on PCIe GPUs | No GPU-specific code needed — swap layer is below GPU driver |
-| OOM safety | Linux swap priority cascade | `swapon -p 100` for remote, `-p 10` for local SSD fallback |
-| Testing | QEMU VMs for kernel module safety | Crashes don't affect host; no special hardware needed |
+| Swap interception | Virtual block device (blk-mq) | frontswap removed in Linux 6.17; block device uses stable API |
+| Kmod I/O model | **Async queue_rq + completion thread** | Synchronous blocked kernel reclaim on UMA, froze system |
+| Kmod↔daemon | Ring buffer via mmap of /dev/duvm_ctl | Low latency, zero-copy staging |
+| Completion signal | Daemon write() to /dev/duvm_ctl | Wakes kernel harvester thread immediately |
+| Transport | TCP default, RDMA optional (auto-detect) | TCP everywhere; RDMA for production (6.8x latency improvement) |
+| DGX Spark safety | Check MemFree not MemAvailable | MemAvailable includes reclaimable cache that GPU driver can't wait for |
+
+## Files Changed This Session
+
+| File | Change |
+|---|---|
+| `duvm-kmod/src/main.c` | Async queue_rq, completion thread, staging bitmap, timeout handler, OOM protection |
+| `duvm-kmod/src/ring.c` | `duvm_ring_submit()`, `duvm_ring_poll_completion()`, staging bitmap alloc |
+| `duvm-kmod/include/duvm_kmod.h` | `duvm_cmd` PDU struct, `comp_thread`, bitmap fields, new ring APIs |
+| `crates/duvm-daemon/src/kmod_ring.rs` | write() to ctl fd after completion (wake kernel thread) |
+| `crates/duvm-daemon/src/main.rs` | oom_score_adj=-999 on startup |
+| `crates/duvm-daemon/examples/demo_rdma.rs` | New: RDMA hardware test binary |
+| `crates/duvm-backend-rdma/src/ffi.rs` | Fix IBV_SEND_SIGNALED (4→2), IBV_WR_RDMA_READ (3→4) |
+| `scripts/setup-hardware-test.sh` | New: one-command hardware test setup |
+| `scripts/swap_pressure_test.c` | New: safe swap pressure test (MemFree-based threshold) |

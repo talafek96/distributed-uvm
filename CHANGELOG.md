@@ -1,10 +1,30 @@
 # Changelog
 
-## 2026-03-30 — RDMA hardware validation on ConnectX-7
+## 2026-03-30 — Async kmod I/O, hardware validation, DGX Spark UMA work
 
+### RDMA Hardware Validation
 - **Fixed IBV_SEND_SIGNALED** (was `1<<2`=4, correct `1<<1`=2) and **IBV_WR_RDMA_READ** (was 3, correct 4). SoftiWARP was lenient; real ConnectX-7 hardware is strict — WRITE completions never arrived.
 - **RDMA hardware test: PASS.** 10,000 pages via one-sided RDMA WRITE/READ on ConnectX-7 RoCEv2 (200Gbps), zero errors, 15μs/page, 273 MB/s. Compared to TCP: 6.8x lower latency, 11.2x higher throughput.
 - Added `demo_rdma.rs` test binary for hardware validation.
+
+### Async Kmod I/O (prevents system freeze)
+- **Converted queue_rq from synchronous to fully async.** queue_rq submits to ring buffer and returns immediately. Completion harvester kthread polls completion ring and calls blk_mq_end_request. Modeled after Linux nbd driver.
+- **Added blk-mq 5-second timeout.** If daemon dies (OOM kill, crash), orphaned requests are failed with BLK_EH_DONE. Kernel falls back to next swap device.
+- **Staging slot bitmap allocator.** Replaced broken `idx % staging_pages` with proper bitmap. Prevents staging page collisions.
+- **Daemon OOM protection.** Sets oom_score_adj=-999 on startup.
+- **Daemon signals kernel on completion.** write() to /dev/duvm_ctl wakes completion thread.
+
+### Full-Stack Swap Test
+- 782MB successfully swapped to duvm_swap0 through kmod→daemon→RDMA→memserver on real hardware.
+- System froze at MemFree=665MB (MemAvailable was 18GB) — a known DGX Spark UMA platform issue, not a duvm bug.
+- Wrote `swap_pressure_test.c`: checks MemFree (not MemAvailable), drops page cache, 256MB chunks, 4GB safety threshold.
+- Added `setup-hardware-test.sh`: one-command setup (stops watchdog, loads kmod, builds test).
+
+### DGX Spark Lessons
+- Secure Boot rejects unsigned kernel modules. Disabled on calc2 via `mokutil --disable-validation`.
+- MemAvailable is misleading on UMA — includes cache that GPU driver can't wait for. Use MemFree.
+- Memory watchdog/earlyoom kill daemon under swap pressure. Must stop them before testing.
+- RDMA device names are `rocep1s0f0` (not `mlx5_0`).
 
 ## 2026-03-26 — Engine retry, distributed TCP test, memserver hardening
 
